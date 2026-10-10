@@ -1,0 +1,151 @@
+# windows-tools
+
+Windows 桌面观察与自动化插件。为 AI Agent 提供：**看**（状态 / UIA 元素快照 / **后台窗口截图**）、**动**（点击 / 输入 / 快捷键 / 拖拽 / 滚轮，支持不打扰用户的后台模式）、**等**（条件等待，替代盲目 sleep）。
+
+同一份逻辑同时面向两个宿主发布：
+
+- `opencode/` — **OpenCode v2** 插件（配置目录热加载，无需重启）
+- `dsh/` — **DeepSeek Harness** 插件（profile 配置层 / `--patch` 覆盖层）
+
+实现：常驻 PowerShell 5.1 宿主进程（`host/wt-host.ps1`），插件通过 JSON 行协议调用；除系统自带组件外**零依赖**。
+
+---
+
+## 工具清单
+
+| dsh 工具名 | OpenCode 工具名 | 说明 |
+|---|---|---|
+| `windows_status` | `windows.status` | 环境总览：屏幕/显示器、光标位置、前台窗口、全部可见窗口（矩形、进程名、窗口状态） |
+| `windows_snapshot` | `windows.snapshot` | UI 元素树（按钮/输入框/列表项…含屏幕坐标）；`target` 指定窗口 |
+| `windows_screenshot` | `windows.screenshot` | PNG 截图；`window` = **后台抓窗口（被遮挡可抓）**；`x/y/width/height` 区域；`scale` 放大 1–4x |
+| `windows_click` | `windows.click` | 点击并回报**命中元素**（UIA hit-test）；`window` = 后台客户区点击（不动鼠标/不抢焦点） |
+| `windows_move` | `windows.move` | 移动鼠标 |
+| `windows_drag` | `windows.drag` | 按住左键拖拽 |
+| `windows_scroll` | `windows.scroll` | 滚轮，回报指针下元素；`window` = 后台投递 |
+| `windows_type` | `windows.type` | 精确 Unicode 输入（含中文）+ **输入后回读校验**；`keys`/`paste` 两种模式；`activate` 原子激活；`window` = 后台投递 |
+| `windows_shortcut` | `windows.shortcut` | 快捷键（ctrl+s、alt+tab…）；`activate`/`window` |
+| `windows_app` | `windows.app` | 启动程序/文档/URL（带参数，报告新窗口标题）或激活窗口（自动恢复最小化） |
+| `windows_clipboard` | `windows.clipboard` | 读/写剪贴板 |
+| `windows_wait` | —（用 `wait_for` 的 settle 替代） | 固定等待 0.1–30 秒 |
+| `windows_wait_for` | `windows.wait_for` | 条件等待：`foreground`（前台标题）/`window`（窗口出现）/`pixel`（像素变化）/`region`（区域像素差异）/`settle`（渲染稳定）；**超时抛错** |
+
+---
+
+## AI 安装
+
+> 以下步骤面向执行安装的 AI Agent / 用户。先完成前置检查，再按你的宿主选择 A 或 B，最后必须运行「自检」。
+
+### 前置检查
+
+```powershell
+# 必须全部满足：Windows 10/11；PowerShell 5.1 可用
+$PSVersionTable.PSVersion    # 期望 Major=5
+```
+
+### 方式 A：OpenCode v2
+
+```powershell
+# $REPO = 本仓库克隆后的绝对路径（按实际修改）
+$REPO = "$env:USERPROFILE\DeepSeek-Harness-Plugins"
+
+$dir = Join-Path $env:USERPROFILE '.config\opencode\plugins\windows-tools'
+New-Item -ItemType Directory -Force -Path $dir | Out-Null
+Copy-Item "$REPO\windows-tools\opencode\index.ts" "$dir\index.ts" -Force
+Copy-Item "$REPO\windows-tools\host\wt-host.ps1"  "$dir\wt-host.ps1" -Force
+
+# 期望：两个文件都存在
+Get-ChildItem $dir | Select-Object Name, Length
+```
+
+**生效方式**：OpenCode 会监听配置目录并热加载，**无需重启**。
+**验证**：在任意 OpenCode 会话中查看工具目录应出现 `windows.status` 等 12 个工具；或直接调用 `windows.status`。
+
+### 方式 B：DeepSeek Harness (dsh)
+
+把插件挂进目标 profile。**任选一种**：
+
+**B1. 覆盖层启动（临时、最简）**
+
+```powershell
+# 1) 将 dsh/windows-tools.cordis.yml 复制到任意位置，把文件里的
+#    <ABSOLUTE_PATH_TO_REPO> 替换为 $REPO 的绝对路径（如 C:/Users/me/DeepSeek-Harness-Plugins）
+# 2) 启动时传入：
+dsh web --patch '<该 yml 的绝对路径>'
+```
+
+**B2. profile 常驻（推荐）**
+
+在目标 profile 的补丁文件末尾追加以下 YAML（`name` 必须是**绝对路径**）：
+
+```yaml
+- insert:
+    - id: windows-tools
+      name: '<$REPO 绝对路径>/windows-tools/dsh/windows-tools.ts'
+```
+
+补丁文件位置：
+
+- Web/CLI：`%USERPROFILE%\.dsh\profiles\<profile>\cordis.patch.yml`（如 `web`）
+- Desktop：`%USERPROFILE%\.dsh\profiles\desktop\cordis.patch.yml`
+
+**注意（重要）**：该文件已是 UTF-8 内容，追加时保持 **UTF-8（无 BOM）** 编码，建议用编辑器追加，不要在 PowerShell 里用默认编码的 `Add-Content` 直接写中文路径。
+
+**生效方式**：重启对应 dsh 进程（Web 服务重启 / 桌面应用重启）。
+**验证**：启动日志**不得出现** `did not activate` 或 `failed to import`；会话中调用 `windows_status` 应返回屏幕信息。
+
+### 自检（两种宿主通用，先跑宿主级自检）
+
+```powershell
+$HOST = "$REPO\windows-tools\host\wt-host.ps1"
+'{"cmd":"status"}' | powershell.exe -NoProfile -ExecutionPolicy Bypass -File $HOST
+```
+
+预期输出两行 JSON（第二行为当前桌面状态，结构如下）：
+
+```
+{"ok":true,"ready":true}
+{"ok":true,"output":"screen: virtual (0,0) 2560x1440 monitors=1\n- monitor 0: ...\nfocus...\nwindows (N):\n  ..."}
+```
+
+> 若在控制台直接执行时中文显示乱码，属控制台编码现象；请以 JSON 结构（`"ok":true`、`screen:` 开头）判定成功。经宿主调用的输出为正确 UTF-8。
+
+---
+
+## 使用示例（后台优先）
+
+```
+看   ：windows_status
+       windows_snapshot({ target: "记事本" })
+       windows_screenshot({ window: "记事本" })            # 被遮挡也能抓，不打扰用户
+动   ：windows_click({ window: "记事本", x: 120, y: 60 })   # 后台点击（客户区坐标）
+       windows_type({ window: "记事本", text: "hello" })    # 后台输入（ASCII 可靠）
+强力 ：windows_type({ activate: "记事本", text: "中文", clear: true })  # 前台精确输入（短暂借用焦点）
+等   ：windows_wait_for({ kind: "settle" })                  # 等渲染稳定
+       windows_wait_for({ kind: "window", value: "下载", timeoutSeconds: 20 })
+```
+
+---
+
+## 限制与安全
+
+- **平台**：仅 Windows 10/11；依赖系统自带 PowerShell 5.1。
+- **后台操作是 best-effort**：经典 Win32 应用可靠；Chromium/Electron/WinUI 等可能部分忽略合成消息；**后台中文输入可能乱码**，需要精确中文输入时用前台 `activate` 模式。
+- **后台截图**：被遮挡窗口可抓；**最小化窗口不可抓**（会明确报错）；极少数 GPU 渲染应用可能黑屏。
+- **前台操作**会移动真实光标并改变焦点；能用 `window` 参数就用它，可完全避免打扰。
+- **UIA 元素树**依赖目标应用的无障碍支持：VS Code 需以 `--force-renderer-accessibility` 启动或设置 `"editor.accessibilitySupport": "on"`。
+- **安全**：插件具备完整桌面控制能力（键鼠模拟、截屏、窗口内容读取），且自身不含审批门禁。仅在可信会话安装使用。
+
+## 卸载
+
+- **OpenCode**：删除 `%USERPROFILE%\.config\opencode\plugins\windows-tools\` 整个目录（热加载自动卸载）。
+- **dsh**：从 profile 补丁中删除对应的 `insert` 行（或启动时不再传 `--patch`），重启进程。
+
+## 维护与构建
+
+- `host/wt-host.ps1` 是**唯一逻辑源头**。
+- 修改后运行构建器重新生成 dsh 版（内嵌宿主）：
+  ```powershell
+  node windows-tools\build\build.mjs
+  ```
+  构建器自带断言（13 个工具注册、1 个 `apply` 导出），失败即中止，不会产出坏文件。
+- OpenCode 版（`opencode/index.ts`）直接读取同目录的 `wt-host.ps1`，无需构建；发布更新后使用方需重新复制或重新克隆。
