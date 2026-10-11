@@ -360,7 +360,13 @@ function Get-WtSnapshot([string]$target) {
         if ($null -ne $el) { $rootEl = $el; $resolvedTitle = $w.Title; break }
       }
     }
-    if ($null -eq $rootEl) { throw ('no window matching title: ' + $target) }
+    if ($null -eq $rootEl) {
+      $resolved = Resolve-WtWindow $target
+      if ($null -ne $resolved) {
+        try { $rootEl = $script:AE::FromHandle($resolved.Handle); $resolvedTitle = $resolved.Title } catch { $rootEl = $null }
+      }
+    }
+    if ($null -eq $rootEl) { throw (Format-WtNoWindowError $target) }
     $lines.Add(('target-window: "{0}"' -f $resolvedTitle))
   } else {
     $hwnd = [WtNative]::GetForegroundWindow()
@@ -379,7 +385,7 @@ function Get-WtSnapshot([string]$target) {
 function Get-WtScreenshotSource($req) {
   if ($null -ne $req.window -and [string]$req.window -ne '') {
     $found = Resolve-WtWindow ([string]$req.window)
-    if ($null -eq $found) { throw ('no window title contains "{0}" for background capture' -f [string]$req.window) }
+    if ($null -eq $found) { throw (Format-WtNoWindowError ([string]$req.window)) }
     if ($found.Iconic) { throw ('the target window "{0}" is minimized; restore it before capturing (minimized windows are not rendered)' -f $found.Title) }
     $hwnd = $found.Handle
     $wr = New-Object WtNative+RECT
@@ -421,6 +427,11 @@ function Get-WtScreenshotSource($req) {
 
 function Save-WtScreenshot($req) {
   $path = [string]$req.path
+  if ([string]::IsNullOrWhiteSpace($path)) {
+    $shotDir = Join-Path $env:TEMP 'opencode-windows-tools'
+    if (-not (Test-Path $shotDir)) { New-Item -ItemType Directory -Path $shotDir -Force | Out-Null }
+    $path = Join-Path $shotDir ('screenshot-{0}.png' -f (Get-Date -Format 'yyyyMMdd-HHmmss-fff'))
+  }
   $source = Get-WtScreenshotSource $req
   $owned = New-Object System.Collections.Generic.List[object]
   try {
@@ -564,7 +575,7 @@ function Get-WtKeyVks([string]$keys) {
 function Get-WtWindowTarget($req) {
   if ($null -eq $req.window -or [string]$req.window -eq '') { return $null }
   $found = Resolve-WtWindow ([string]$req.window)
-  if ($null -eq $found) { throw ('no window title contains "{0}"' -f [string]$req.window) }
+  if ($null -eq $found) { throw (Format-WtNoWindowError ([string]$req.window)) }
   return $found
 }
 
@@ -704,7 +715,7 @@ function Invoke-WtBackgroundScroll($found, [int]$amount) {
 
 function Read-WtWindowText([string]$target) {
   $found = Resolve-WtWindow $target
-  if ($null -eq $found) { throw ('no window title contains "{0}"' -f $target) }
+  if ($null -eq $found) { throw (Format-WtNoWindowError $target) }
   $element = $script:AE::FromHandle($found.Handle)
   if ($null -eq $element) { throw ('window "{0}" exposes no UI Automation element' -f $found.Title) }
   $documentCondition = New-Object System.Windows.Automation.PropertyCondition -ArgumentList ([System.Windows.Automation.AutomationElement]::ControlTypeProperty), ([System.Windows.Automation.ControlType]::Document)
@@ -813,6 +824,15 @@ function Invoke-WtMouse($req) {
   }
 }
 
+function Format-WtNoWindowError([string]$target) {
+  $items = New-Object System.Collections.Generic.List[string]
+  foreach ($w in [WtNative]::ListTopLevelWindows()) {
+    if ($items.Count -ge 8) { break }
+    if ($w.Visible -and -not [string]::IsNullOrWhiteSpace($w.Title)) { $items.Add(('"{0}" [{1}]' -f $w.Title, (Get-WtProcessName $w.ProcessId))) }
+  }
+  return ('no window matches "{0}"; visible windows (title [process]): {1}; tip: targets match a title substring, a process name (e.g. Weixin), or a PID - WeChat 4.x retitles its main window with the open chat, so prefer its process name or PID' -f $target, ($items -join ' | '))
+}
+
 function Resolve-WtWindow([string]$target) {
   $isPid = $target -match '^[0-9]+$'
   $pidValue = -1
@@ -825,6 +845,18 @@ function Resolve-WtWindow([string]$target) {
       if ($w.Title.IndexOf($target, [System.StringComparison]::OrdinalIgnoreCase) -lt 0) { continue }
     }
     [void]$candidates.Add($w)
+  }
+  if ($candidates.Count -eq 0 -and $pidValue -lt 0) {
+    # Some apps retitle their main window dynamically (WeChat 4.x shows the
+    # open chat's name), so a title lookup fails; fall back to the process name.
+    $procPids = @{}
+    $procName = [System.IO.Path]::GetFileNameWithoutExtension($target)
+    foreach ($p in (Get-Process -Name $procName -ErrorAction SilentlyContinue)) { $procPids[$p.Id] = $true }
+    if ($procPids.Count -gt 0) {
+      foreach ($w in [WtNative]::ListTopLevelWindows()) {
+        if ($procPids.ContainsKey($w.ProcessId)) { [void]$candidates.Add($w) }
+      }
+    }
   }
   if ($candidates.Count -eq 0 -and $pidValue -ge 0) {
     # Packaged or stub launchers expose the real window under another process;
@@ -861,12 +893,7 @@ function Invoke-WtActivate([string]$target) {
       if ($null -eq $process) { throw ('process {0} does not exist' -f $target) }
       throw ('process {0} ({1}) is running but exposes no top-level window to activate' -f $target, $process.ProcessName)
     }
-    $titles = New-Object System.Collections.Generic.List[string]
-    foreach ($w in [WtNative]::ListTopLevelWindows()) {
-      if ($titles.Count -ge 8) { break }
-      if ($w.Visible) { $titles.Add($w.Title) }
-    }
-    throw ('no window title contains "{0}"; visible windows: {1}' -f $target, ($titles -join ' | '))
+    throw (Format-WtNoWindowError $target)
   }
   $hwnd = $found.Handle
   if ($found.Iconic) { [void][WtNative]::ShowWindow($hwnd, 9) }

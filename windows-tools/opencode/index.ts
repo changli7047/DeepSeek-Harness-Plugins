@@ -137,7 +137,7 @@ export default Plugin.define({
         description: "Capture the desktop UI state: screen and foreground window, visible windows, and the full interactive element tree (buttons, edits, list items, menus, links, ...) of the foreground window with screen coordinates. Set `target` for a specific window by title substring. Coordinates are virtual-desktop pixels; pass them to windows.click/move/drag.",
         input: {
           type: "object",
-          properties: { target: { type: "string", description: "Window title substring; captures that window's element tree instead of the foreground window." } },
+          properties: { target: { type: "string", description: "Window target: title substring, process name, or PID; captures that window's element tree instead of the foreground window." } },
           additionalProperties: false,
         },
         options: { namespace: "windows", codemode: true },
@@ -156,7 +156,7 @@ export default Plugin.define({
           type: "object",
           properties: {
             filePath: { type: "string", description: "Absolute path for the PNG; defaults to a timestamped temp file." },
-            window: { type: "string", description: "Window title substring or PID; captures that window in the background." },
+            window: { type: "string", description: "Window target: title substring, process name (e.g. Weixin), or PID; captures that window in the background." },
             x: { type: "number", description: "Region left edge." },
             y: { type: "number", description: "Region top edge." },
             width: { type: "number", description: "Region width (requires x and y)." },
@@ -193,14 +193,14 @@ export default Plugin.define({
 
       editor.add({
         name: "click",
-        description: "Click a mouse button and report the UI element under the point (UIA hit-test). Default: screen coordinates on the real desktop (moves the cursor, changes focus). With `window`: x, y are CLIENT coordinates and the click is posted in the background without moving the mouse or changing focus (best-effort; classic Win32 apps reliable, Chromium/Electron may ignore).",
+        description: "Click a mouse button and report the UI element under the point (UIA hit-test). Default: screen coordinates on the real desktop (moves the cursor, changes focus). With `window`: x, y are CLIENT coordinates and the click is posted in the background without moving the mouse or changing focus (best-effort; classic Win32 and Qt apps incl. WeChat 4.x are reliable, Chromium/Electron may ignore).",
         input: {
           type: "object",
           properties: {
             x: { type: "number", description: "X coordinate (client x when window is set)." },
             y: { type: "number", description: "Y coordinate (client y when window is set)." },
             button: { type: "string", enum: ["left", "right", "double"], description: "Which click; defaults to single left click." },
-            window: { type: "string", description: "Window title substring or PID; posts the click in the background." },
+            window: { type: "string", description: "Window target: title substring, process name (e.g. Weixin), or PID; posts the click in the background." },
           },
           required: ["x", "y"],
           additionalProperties: false,
@@ -262,7 +262,7 @@ export default Plugin.define({
             amount: { type: "number", description: "Wheel clicks; negative scrolls down." },
             x: { type: "number", description: "Optional pointer x before scrolling." },
             y: { type: "number", description: "Optional pointer y before scrolling." },
-            window: { type: "string", description: "Window title substring or PID; posts the scroll in the background." },
+            window: { type: "string", description: "Window title substring, process name, or PID; posts the scroll in the background." },
           },
           required: ["amount"],
           additionalProperties: false,
@@ -283,15 +283,15 @@ export default Plugin.define({
 
       editor.add({
         name: "type",
-        description: "Type text into the focused control with exact Unicode input; the focused control is read back and the call fails if the text did not land. Mode 'keys' (default) types per character; 'paste' uses the clipboard for bulk text. `clear` selects all first; `activate` brings a window forward atomically; `window` posts to that window in the background (no focus change, not verified, clear ignored, CJK may garble in modern apps).",
+        description: "Type text into the focused control with exact Unicode input; the focused control is read back and the call fails if the text did not land. Mode 'keys' (default) types per character; 'paste' uses the clipboard for bulk text. `clear` selects all first; `activate` brings a window forward atomically; `window` posts to that window in the background (no focus change, not verified, clear ignored; CJK is handled automatically for WeChat 4.x and classic Win32, may garble in WinUI/UWP apps).",
         input: {
           type: "object",
           properties: {
             text: { type: "string", description: "Text to type." },
             clear: { type: "boolean", description: "Select all (Ctrl+A) before typing; default false." },
             mode: { type: "string", enum: ["keys", "paste"], description: "Input method; default 'keys'." },
-            activate: { type: "string", description: "Window title substring or PID to activate first, atomically." },
-            window: { type: "string", description: "Window title substring or PID; posts the text in the background." },
+            activate: { type: "string", description: "Window title substring, process name, or PID to activate first, atomically." },
+            window: { type: "string", description: "Window target: title substring, process name (e.g. Weixin), or PID; posts the text in the background." },
           },
           required: ["text"],
           additionalProperties: false,
@@ -314,8 +314,8 @@ export default Plugin.define({
           type: "object",
           properties: {
             keys: { type: "string", description: "Keys joined with '+', pressed in order and released in reverse." },
-            activate: { type: "string", description: "Window title substring or PID to activate first, atomically." },
-            window: { type: "string", description: "Window title substring or PID; posts the keys in the background." },
+            activate: { type: "string", description: "Window title substring, process name, or PID to activate first, atomically." },
+            window: { type: "string", description: "Window title substring, process name, or PID; posts the keys in the background." },
           },
           required: ["keys"],
           additionalProperties: false,
@@ -332,12 +332,12 @@ export default Plugin.define({
 
       editor.add({
         name: "app",
-        description: "Launch an application, document or URL (action launch; reports the new window title when one appears) or bring an existing window to the foreground (action activate; target is a title substring or PID; minimized windows are restored).",
+        description: "Launch an application, document or URL (action launch; reports the new window title when one appears) or bring an existing window to the foreground (action activate; target is a title substring, process name, or PID; minimized windows are restored).",
         input: {
           type: "object",
           properties: {
             action: { type: "string", enum: ["launch", "activate"], description: "launch starts something new; activate focuses an existing window." },
-            target: { type: "string", description: "Executable/document/URL for launch; title substring or PID for activate." },
+            target: { type: "string", description: "Executable/document/URL for launch; title substring, process name, or PID for activate." },
             args: { type: "string", description: "Optional command-line arguments for launch." },
           },
           required: ["action", "target"],

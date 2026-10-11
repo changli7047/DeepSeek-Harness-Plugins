@@ -395,7 +395,13 @@ function Get-WtSnapshot([string]$target) {
         if ($null -ne $el) { $rootEl = $el; $resolvedTitle = $w.Title; break }
       }
     }
-    if ($null -eq $rootEl) { throw ('no window matching title: ' + $target) }
+    if ($null -eq $rootEl) {
+      $resolved = Resolve-WtWindow $target
+      if ($null -ne $resolved) {
+        try { $rootEl = $script:AE::FromHandle($resolved.Handle); $resolvedTitle = $resolved.Title } catch { $rootEl = $null }
+      }
+    }
+    if ($null -eq $rootEl) { throw (Format-WtNoWindowError $target) }
     $lines.Add(('target-window: "{0}"' -f $resolvedTitle))
   } else {
     $hwnd = [WtNative]::GetForegroundWindow()
@@ -414,7 +420,7 @@ function Get-WtSnapshot([string]$target) {
 function Get-WtScreenshotSource($req) {
   if ($null -ne $req.window -and [string]$req.window -ne '') {
     $found = Resolve-WtWindow ([string]$req.window)
-    if ($null -eq $found) { throw ('no window title contains "{0}" for background capture' -f [string]$req.window) }
+    if ($null -eq $found) { throw (Format-WtNoWindowError ([string]$req.window)) }
     if ($found.Iconic) { throw ('the target window "{0}" is minimized; restore it before capturing (minimized windows are not rendered)' -f $found.Title) }
     $hwnd = $found.Handle
     $wr = New-Object WtNative+RECT
@@ -456,6 +462,11 @@ function Get-WtScreenshotSource($req) {
 
 function Save-WtScreenshot($req) {
   $path = [string]$req.path
+  if ([string]::IsNullOrWhiteSpace($path)) {
+    $shotDir = Join-Path $env:TEMP 'opencode-windows-tools'
+    if (-not (Test-Path $shotDir)) { New-Item -ItemType Directory -Path $shotDir -Force | Out-Null }
+    $path = Join-Path $shotDir ('screenshot-{0}.png' -f (Get-Date -Format 'yyyyMMdd-HHmmss-fff'))
+  }
   $source = Get-WtScreenshotSource $req
   $owned = New-Object System.Collections.Generic.List[object]
   try {
@@ -599,7 +610,7 @@ function Get-WtKeyVks([string]$keys) {
 function Get-WtWindowTarget($req) {
   if ($null -eq $req.window -or [string]$req.window -eq '') { return $null }
   $found = Resolve-WtWindow ([string]$req.window)
-  if ($null -eq $found) { throw ('no window title contains "{0}"' -f [string]$req.window) }
+  if ($null -eq $found) { throw (Format-WtNoWindowError ([string]$req.window)) }
   return $found
 }
 
@@ -739,7 +750,7 @@ function Invoke-WtBackgroundScroll($found, [int]$amount) {
 
 function Read-WtWindowText([string]$target) {
   $found = Resolve-WtWindow $target
-  if ($null -eq $found) { throw ('no window title contains "{0}"' -f $target) }
+  if ($null -eq $found) { throw (Format-WtNoWindowError $target) }
   $element = $script:AE::FromHandle($found.Handle)
   if ($null -eq $element) { throw ('window "{0}" exposes no UI Automation element' -f $found.Title) }
   $documentCondition = New-Object System.Windows.Automation.PropertyCondition -ArgumentList ([System.Windows.Automation.AutomationElement]::ControlTypeProperty), ([System.Windows.Automation.ControlType]::Document)
@@ -848,6 +859,15 @@ function Invoke-WtMouse($req) {
   }
 }
 
+function Format-WtNoWindowError([string]$target) {
+  $items = New-Object System.Collections.Generic.List[string]
+  foreach ($w in [WtNative]::ListTopLevelWindows()) {
+    if ($items.Count -ge 8) { break }
+    if ($w.Visible -and -not [string]::IsNullOrWhiteSpace($w.Title)) { $items.Add(('"{0}" [{1}]' -f $w.Title, (Get-WtProcessName $w.ProcessId))) }
+  }
+  return ('no window matches "{0}"; visible windows (title [process]): {1}; tip: targets match a title substring, a process name (e.g. Weixin), or a PID - WeChat 4.x retitles its main window with the open chat, so prefer its process name or PID' -f $target, ($items -join ' | '))
+}
+
 function Resolve-WtWindow([string]$target) {
   $isPid = $target -match '^[0-9]+$'
   $pidValue = -1
@@ -860,6 +880,18 @@ function Resolve-WtWindow([string]$target) {
       if ($w.Title.IndexOf($target, [System.StringComparison]::OrdinalIgnoreCase) -lt 0) { continue }
     }
     [void]$candidates.Add($w)
+  }
+  if ($candidates.Count -eq 0 -and $pidValue -lt 0) {
+    # Some apps retitle their main window dynamically (WeChat 4.x shows the
+    # open chat's name), so a title lookup fails; fall back to the process name.
+    $procPids = @{}
+    $procName = [System.IO.Path]::GetFileNameWithoutExtension($target)
+    foreach ($p in (Get-Process -Name $procName -ErrorAction SilentlyContinue)) { $procPids[$p.Id] = $true }
+    if ($procPids.Count -gt 0) {
+      foreach ($w in [WtNative]::ListTopLevelWindows()) {
+        if ($procPids.ContainsKey($w.ProcessId)) { [void]$candidates.Add($w) }
+      }
+    }
   }
   if ($candidates.Count -eq 0 -and $pidValue -ge 0) {
     # Packaged or stub launchers expose the real window under another process;
@@ -896,12 +928,7 @@ function Invoke-WtActivate([string]$target) {
       if ($null -eq $process) { throw ('process {0} does not exist' -f $target) }
       throw ('process {0} ({1}) is running but exposes no top-level window to activate' -f $target, $process.ProcessName)
     }
-    $titles = New-Object System.Collections.Generic.List[string]
-    foreach ($w in [WtNative]::ListTopLevelWindows()) {
-      if ($titles.Count -ge 8) { break }
-      if ($w.Visible) { $titles.Add($w.Title) }
-    }
-    throw ('no window title contains "{0}"; visible windows: {1}' -f $target, ($titles -join ' | '))
+    throw (Format-WtNoWindowError $target)
   }
   $hwnd = $found.Handle
   if ($found.Iconic) { [void][WtNative]::ShowWindow($hwnd, 9) }
@@ -1379,7 +1406,7 @@ export function apply(ctx: Context): void {
     name: 'windows_snapshot',
     description: 'Capture the desktop UI state for automation: virtual screen size, foreground window, visible windows, and the interactive element tree (buttons, edits, list items, menus, links, ...) of the foreground window, each with screen coordinates. Set `window` to capture a specific window by title substring instead. Coordinates are virtual-desktop pixels with origin at the top-left; pass them to windows_click / windows_move / windows_drag.',
     parameters: {
-      window: { type: 'string', description: 'Optional window title substring; when set, the element tree of the matching top-level window is captured instead of the foreground window.' },
+      window: { type: 'string', description: 'Optional window target: title substring, process name, or PID; when set, the element tree of the matching top-level window is captured instead of the foreground window.' },
     },
     output: {
       schema: { type: 'string' },
@@ -1400,7 +1427,7 @@ export function apply(ctx: Context): void {
     parameters: {
       filePath: { type: 'string', description: 'Optional absolute path for the PNG file; defaults to a timestamped file under the system temporary directory.' },
       attachImage: { type: 'boolean', description: 'Set false to skip returning the image and only save the file; defaults to true.' },
-      window: { type: 'string', description: 'Optional window title substring or PID; captures that window in the background instead of the screen.' },
+      window: { type: 'string', description: 'Optional window target: title substring, process name (e.g. Weixin), or PID. Captures that window in the background instead of the screen.' },
       x: { type: 'integer', description: 'Optional region left edge in screen pixels.' },
       y: { type: 'integer', description: 'Optional region top edge in screen pixels.' },
       width: { type: 'integer', description: 'Optional region width; requires x and y.' },
@@ -1481,12 +1508,12 @@ export function apply(ctx: Context): void {
 
   ctx.tools.register(defineTool({
     name: 'windows_click',
-    description: 'Click a mouse button and report the UI element under the point (UIA hit-test) so you can confirm the target. Default: screen coordinates in virtual-desktop pixels, executed on the real desktop (moves the cursor and changes focus). With `window`: x, y are CLIENT coordinates of that window and the click is posted in the background without moving the mouse or changing focus — best-effort, reliable for classic Win32 apps, while Chromium/Electron apps may ignore synthetic clicks.',
+    description: 'Click a mouse button and report the UI element under the point (UIA hit-test) so you can confirm the target. Default: screen coordinates in virtual-desktop pixels, executed on the real desktop (moves the cursor and changes focus). With `window`: x, y are CLIENT coordinates of that window and the click is posted in the background without moving the mouse or changing focus — best-effort, reliable for classic Win32 and Qt apps (including WeChat 4.x, whose message routing and encoding are handled automatically), while Chromium/Electron apps may ignore synthetic clicks.',
     parameters: {
       x: { type: 'integer', required: true, description: 'Screen x coordinate of the click point (client x when window is set).' },
       y: { type: 'integer', required: true, description: 'Screen y coordinate of the click point (client y when window is set).' },
       button: { type: 'string', enum: ['left', 'right', 'double'], description: 'Which click to perform; defaults to a single left click.' },
-      window: { type: 'string', description: 'Optional window title substring or PID; posts the click to that window in the background (x, y are client coordinates).' },
+      window: { type: 'string', description: 'Optional window target: title substring, process name (e.g. Weixin), or PID. Posts the click to that window in the background (x, y are client coordinates, the same space as the windows_screenshot image of that window).' },
     },
     output: {
       schema: { type: 'string' },
@@ -1546,7 +1573,7 @@ export function apply(ctx: Context): void {
       amount: { type: 'integer', required: true, description: 'Number of wheel clicks; negative values scroll down.' },
       x: { type: 'integer', description: 'Optional screen x coordinate to move the pointer to before scrolling.' },
       y: { type: 'integer', description: 'Optional screen y coordinate to move the pointer to before scrolling.' },
-      window: { type: 'string', description: 'Optional window title substring or PID; posts the scroll to that window in the background.' },
+      window: { type: 'string', description: 'Optional window title substring, process name, or PID; posts the scroll to that window in the background.' },
     },
     output: {
       schema: { type: 'string' },
@@ -1568,13 +1595,13 @@ export function apply(ctx: Context): void {
 
   ctx.tools.register(defineTool({
     name: 'windows_type',
-    description: "Type text into the focused control with exact Unicode input (spaces, punctuation, CJK and symbols are preserved). After typing, the focused control is read back and the call fails if the text did not land. Mode 'keys' (default) synthesizes per-character Unicode input; mode 'paste' uses the clipboard for bulk text. Set `clear` to select all (Ctrl+A) first; set `activate` to bring a window forward atomically before typing. With `window`, the text is posted to that window in the background (no focus change, result not verified, `clear` is ignored) — best-effort: ASCII text is reliable, but non-ASCII (CJK) input may be garbled or dropped by modern WinUI/UWP apps, so prefer foreground mode with `activate` when exact CJK input matters.",
+    description: "Type text into the focused control with exact Unicode input (spaces, punctuation, CJK and symbols are preserved). After typing, the focused control is read back and the call fails if the text did not land. Mode 'keys' (default) synthesizes per-character Unicode input; mode 'paste' uses the clipboard for bulk text. Set `clear` to select all (Ctrl+A) first; set `activate` to bring a window forward atomically before typing. With `window`, the text is posted to that window in the background (no focus change, result not verified, `clear` is ignored) — best-effort: ASCII is reliable; CJK is reliable for classic Win32 and Qt apps including WeChat 4.x (byte encoding handled automatically) but may be garbled or dropped by modern WinUI/UWP apps, so prefer foreground mode with `activate` there.",
     parameters: {
       text: { type: 'string', required: true, description: 'The text to type into the focused control.' },
       clear: { type: 'boolean', description: 'Select all existing content (Ctrl+A) before typing; defaults to false.' },
       mode: { type: 'string', enum: ['keys', 'paste'], description: "Input method; defaults to 'keys' (exact per-character Unicode input). 'paste' is faster for large text." },
-      activate: { type: 'string', description: 'Optional window title substring or PID to activate first, in the same call.' },
-      window: { type: 'string', description: 'Optional window title substring or PID; posts the text to that window in the background instead of the focused control.' },
+      activate: { type: 'string', description: 'Optional window title substring, process name, or PID to activate first, in the same call.' },
+      window: { type: 'string', description: 'Optional window target: title substring, process name (e.g. Weixin), or PID. Posts the text to that window in the background instead of the focused control.' },
     },
     output: {
       schema: { type: 'string' },
@@ -1596,8 +1623,8 @@ export function apply(ctx: Context): void {
     description: "Press a keyboard shortcut, for example 'ctrl+s', 'alt+tab', 'ctrl+shift+esc', or a single key like 'win', 'enter', 'esc'. Set `activate` to bring a window forward first, in the same call, so the shortcut cannot land in another window. With `window`, the key messages are posted to that window in the background (no focus change) — best-effort: classic Win32 apps accept them, Chromium/Electron apps may ignore some. Supported names: ctrl, alt, shift, win, a-z, 0-9, f1-f12, enter, tab, esc, space, backspace, delete, insert, up, down, left, right, home, end, pageup, pagedown, minus, equal, comma, period, slash.",
     parameters: {
       keys: { type: 'string', required: true, description: "Keys joined with '+', pressed in order and released in reverse, e.g. 'ctrl+alt+delete'." },
-      activate: { type: 'string', description: 'Optional window title substring or PID to activate first, in the same call.' },
-      window: { type: 'string', description: 'Optional window title substring or PID; posts the keys to that window in the background instead of the focused window.' },
+      activate: { type: 'string', description: 'Optional window title substring, process name, or PID to activate first, in the same call.' },
+      window: { type: 'string', description: 'Optional window title substring, process name, or PID; posts the keys to that window in the background instead of the focused window.' },
     },
     output: {
       schema: { type: 'string' },
@@ -1615,10 +1642,10 @@ export function apply(ctx: Context): void {
 
   ctx.tools.register(defineTool({
     name: 'windows_app',
-    description: 'Launch an application, document, or URL (action launch, ShellExecute semantics, optional args; reports the new window title when one appears), or bring an existing window to the foreground (action activate; target is a window title substring or PID; minimized windows are restored).',
+    description: 'Launch an application, document, or URL (action launch, ShellExecute semantics, optional args; reports the new window title when one appears), or bring an existing window to the foreground (action activate; target is a window title substring, process name, or PID; minimized windows are restored).',
     parameters: {
       action: { type: 'string', enum: ['launch', 'activate'], required: true, description: 'launch starts something new; activate focuses an existing window.' },
-      target: { type: 'string', required: true, description: 'Executable path, document, or URL for launch; window title substring or PID for activate.' },
+      target: { type: 'string', required: true, description: 'Executable path, document, or URL for launch; window title substring, process name, or PID for activate.' },
       args: { type: 'string', description: 'Optional command line arguments for launch.' },
     },
     output: {
