@@ -20,7 +20,7 @@
 | 备份与版本 | 内置**免 git 快照备份**（时间戳目录 + manifest + 轮转）；有 git 时可选 `archivist_commit` |
 | 可检索的规模 | `archivist_search` 支持 `scope: wiki / raw / all`，CJK 二元组 + 短语 + IDF 稀有度加权 |
 
-## 工具清单（12 个）
+## 工具清单（13 个）
 
 | dsh 工具 | OpenCode 工具 | 作用 |
 |---|---|---|
@@ -29,6 +29,7 @@
 | `archivist_status` | `archivist.status` | 概览：页数、token 估算、源状态、最近日志 |
 | `archivist_sources` | `archivist.sources` | `raw/` 清单与摄入状态（new / changed / ingested，哈希跟踪） |
 | `archivist_search` | `archivist.search` | 检索（词法级）：标题+全文，CJK 二元组/整短语/紧凑变体/IDF |
+| `archivist_scan` | `archivist.scan` | **全量精确扫描**：计数 + 完整文件清单 + 覆盖声明（穷尽/统计类问题专用，不做 top-K 截断） |
 | `archivist_read` | `archivist.read` | 读页（标题宽容解析、支持批量） |
 | `archivist_write` | `archivist.write` | 校验并写页：frontmatter 补全、索引自动重建、源标记、可选日志 |
 | `archivist_index` | `archivist.index` | 确定性重建 `index.md`（根治目录漂移） |
@@ -42,6 +43,7 @@
 - **trust 分级**：页面默认 `medium`（有 raw 出处）或 `low`（模型派生、无出处）；`high` 保留给用户确认内容。检索会给低信任页标注`低信任`，`archivist_read`/`archivist.read` 返回状态横幅
 - **raw-first 蒸馏**：对话先落 `raw/conversations/` 原文，再编译成页（`sourceFile` 锚定出处）——蒸馏产物可回查、可审计
 - **纠错永不覆盖历史**：`supersedes` 写替代页（旧页自动 `superseded`，检索降权并标注替代关系）；`retract` 撤回（检索排除）；`archivist_lint`/`archivist.lint` 校验替代链完整性
+- **穷尽类问题路由**：`archivist_scan`/`archivist.scan` 提供全量精确计数与完整文件清单（附覆盖声明，不做 top-K 截断）；检索检测到穷尽/计数意图时会提示改用 scan
 
 ## 对话蒸馏钩子（可选组件）
 
@@ -94,7 +96,7 @@ Copy-Item "$REPO\archivist\opencode\archivist-distill.ts" "$dir\archivist-distil
 ```
 
 **生效方式**：OpenCode 监听配置目录并热加载，无需重启。
-**验证**：会话工具目录出现 `tools.archivist.*`（12 个）。
+**验证**：会话工具目录出现 `tools.archivist.*`（13 个）。
 
 ### 方式 B：dsh
 
@@ -149,7 +151,7 @@ node selftest.mjs
 
 - `core/archivist.mjs` 是**唯一逻辑源头**；改动后运行：
   ```powershell
-  node build/build.mjs     # 重生成 opencode/index.ts 与 dsh/archivist.ts（断言 12 个工具注册）
+  node build/build.mjs     # 重生成 opencode/index.ts 与 dsh/archivist.ts（断言 13 个工具注册）
   ```
 - 两个钩子文件与 `bench/` 为静态工具，直接编辑
 - 基准与统计：

@@ -17,7 +17,7 @@ const core = readFileSync(path.join(root, 'core', 'archivist.mjs'), 'utf8')
 
 if (core.includes('__CORE__')) throw new Error('core contains the __CORE__ placeholder — refusing to build')
 const toolCount = (core.match(/name: 'archivist_/g) ?? []).length
-if (toolCount !== 12) throw new Error(`expected 12 tools in the core, found ${toolCount}`)
+if (toolCount !== 13) throw new Error(`expected 13 tools in the core, found ${toolCount}`)
 
 const jobs = [
   { template: 'opencode.template.ts', out: 'opencode/index.ts', marker: 'export default Plugin.define', registrations: 'for (const tool of TOOLS)' },

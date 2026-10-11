@@ -232,7 +232,7 @@ last_updated: YYYY-MM-DD（由 archivist_write 自动填）
 3. 只写决策/结论/方法，不搬运流水账；没有 raw 出处的页默认 trust=low
 
 ### Query（提问）
-1. \`archivist_search\` 取前 10–15 个相关页；结果会标注 \`低信任\` / \`已被 xxx 替代\`，已撤回页自动排除
+1. \`archivist_search\` 取前 10–15 个相关页；结果会标注 \`低信任\` / \`已被 xxx 替代\`，已撤回页自动排除；**穷尽/计数类问题（全部/从未/多少）改用 \`archivist_scan\`**（精确计数 + 完整清单 + 覆盖声明）
 2. \`archivist_read\` 精读命中页（可顺 wikilink 多跳）；低信任页只作导航，关键事实回读 \`sources\` 指向的 raw 原文验证，或在回答中声明来源级别
 3. 基于页面回答并引用页面路径；答案有价值时 \`archivist_write\` 存到 \`syntheses/\`
 4. \`archivist_log\` 追加：\`query | <问题>\`
@@ -254,6 +254,7 @@ last_updated: YYYY-MM-DD（由 archivist_write 自动填）
 - \`raw/\` 永不修改；一切衍生内容写进 \`wiki/\`
 - **能影响回答的事实都要能回到 raw 出处**；回流不了的标注 \`trust: low\`
 - 修正用替代/撤回记录，不覆盖历史
+- 穷尽/计数问题用 archivist_scan 的精确计数回答并声明覆盖范围；不要用 top-K 结果冒充全库
 - 页面保持原子化（一页一主题），标题清晰，wikilink 至少连 2 个其他页
 `
 
@@ -670,8 +671,11 @@ export function searchWiki(dir, query, limit = 15, scope = 'wiki') {
   }
   results.sort((a, b) => b.score - a.score)
   const top = results.slice(0, Math.max(1, Math.min(30, limit)))
+  const exhaustHint = looksExhaustive(query)
+    ? `\n\n⚠ 穷尽/计数类意图检测：top-K 结果不能代表全库；请用 archivist_scan 获取精确计数与完整文件清单，并在回答中声明覆盖范围。`
+    : ''
   if (!top.length) {
-    return `no match for "${query}" (scope: ${scope}). Try other keywords, widen scope to 'all', or read wiki/index.md / wiki/overview.md directly.`
+    return `no match for "${query}" (scope: ${scope}). Try other keywords, widen scope to 'all', or read wiki/index.md / wiki/overview.md directly.${exhaustHint}`
   }
   return top.map((r, i) => {
     const marks = []
@@ -679,7 +683,76 @@ export function searchWiki(dir, query, limit = 15, scope = 'wiki') {
     if (r.trust === 'low') marks.push('低信任')
     const mark = marks.length ? `（${marks.join('；')}）` : ''
     return `${i + 1}. [${Math.round(r.score * 10) / 10}] ${r.label} — ${r.title}${mark}${r.summary ? ' | ' + r.summary : ''}\n   ${r.snippet}`
-  }).join('\n')
+  }).join('\n') + exhaustHint
+}
+
+// ---------------------------------------------------------------- scan
+// Deterministic full-corpus scan for exhaustive / counting questions: exact
+// occurrence counts over every eligible file, never a top-K sample.
+
+/** Exact (uncapped) count of a lowercase needle in a lowercase haystack. */
+function countAll(hay, needle) {
+  let n = 0
+  let i = 0
+  while (needle.length > 0) {
+    const j = hay.indexOf(needle, i)
+    if (j < 0) break
+    n++
+    i = j + needle.length
+  }
+  return n
+}
+
+/** Heuristic: does the question ask for exhaustive / counting coverage? */
+function looksExhaustive(q) {
+  return /(全部|所有|每一个?|每次|每一项|从未|从来没有|一共|总共|合计|数量|多少个?|几条|几项|几次|哪些|清单|count|how many|list all|\ball\b|\bevery\b|\btotal\b)/i.test(String(q))
+}
+
+/**
+ * Scan raw/ and/or wiki/ for an exact substring and report EXACT totals plus
+ * every matching file (counts stay exact even when the file list is truncated).
+ */
+export function scanCorpus(dir, query, scope = 'all') {
+  const needle = String(query ?? '').toLowerCase()
+  if (!needle.trim()) throw new Error('scan requires a non-empty query')
+  if (!['raw', 'wiki', 'all'].includes(scope)) throw new Error(`invalid scope "${scope}" — use raw | wiki | all`)
+  const rows = []
+  let total = 0
+  let scanned = 0
+  if (scope === 'raw' || scope === 'all') {
+    for (const f of walkFiles(path.join(dir, 'raw'))) {
+      const rel = toPosixRel(dir, f)
+      if (!/\.(md|txt|json|csv|ya?ml)$/i.test(rel)) continue
+      const hit = rawCacheEntry(f)
+      if (!hit) continue
+      if (hit.entry.size > 2 * 1024 * 1024) continue
+      if (!hit.entry.text) {
+        try { hit.entry.text = readFileSync(f, 'utf8') } catch { continue }
+      }
+      scanned++
+      const c = countAll(hit.entry.text.toLowerCase(), needle)
+      if (c > 0) { total += c; rows.push({ label: rel, count: c }) }
+    }
+  }
+  if (scope === 'wiki' || scope === 'all') {
+    for (const p of listPages(dir)) {
+      if (p.fm.status === 'retracted') continue
+      scanned++
+      const c = countAll(p.body.toLowerCase(), needle)
+      if (c > 0) { total += c; rows.push({ label: 'wiki/' + p.rel, count: c }) }
+    }
+  }
+  rows.sort((a, b) => b.count - a.count)
+  const scopeText = scope === 'raw' ? 'raw/' : scope === 'wiki' ? 'wiki/' : 'raw/ + wiki/'
+  const head = `scan "${query}" (scope ${scope}): matched in ${rows.length} of ${scanned} file(s); total occurrences: ${total}`
+  if (!rows.length) {
+    return `${head}\n覆盖声明：已扫描 ${scopeText} 全部符合扩展名的文件。未命中不等于不存在——检查拼写、别名或其他工作区。`
+  }
+  const shown = rows.slice(0, 60)
+  const list = shown.map((r) => `- ${r.label} × ${r.count}`).join('\n')
+  const more = rows.length > 60 ? `\n…(完整清单还有 ${rows.length - 60} 个文件未显示；计数不受影响)` : ''
+  const truncNote = rows.length > 60 ? '（清单截断，计数与文件数准确）' : '（完整清单）'
+  return `${head}\n${list}${more}\n覆盖声明：以上为全部命中文件${truncNote}。穷尽/统计类问题以此计数为准，不要用 top-K 检索结果代替。`
 }
 
 // ---------------------------------------------------------------- lint
@@ -967,6 +1040,21 @@ export const TOOLS = [
       additionalProperties: false,
     },
     run: (a) => searchWiki(resolveDir(a.workspace), String(a.query ?? ''), a.limit ? Number(a.limit) : 15, String(a.scope || 'wiki')),
+  },
+  {
+    name: 'archivist_scan',
+    description: 'Deterministic full-corpus scan (no top-K truncation): counts EXACT occurrences of a substring across raw/ and/or wiki/ and lists every matching file, with a coverage statement. Use for exhaustive or counting questions ("all", "every", "how many", "list all") and state the coverage in the answer; use archivist_search for relevance-ranked lookup instead.',
+    schema: {
+      type: 'object',
+      properties: {
+        query: { type: 'string', description: 'Exact substring to count (case-insensitive).' },
+        scope: { type: 'string', enum: ['raw', 'wiki', 'all'], description: 'What to scan; defaults to all (raw/ + wiki/).' },
+        workspace: WS_PROP,
+      },
+      required: ['query'],
+      additionalProperties: false,
+    },
+    run: (a) => scanCorpus(resolveDir(a.workspace), String(a.query ?? ''), String(a.scope || 'all')),
   },
   {
     name: 'archivist_read',

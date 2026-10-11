@@ -5,7 +5,7 @@
 import {
   initWorkspace, attachWorkspace, listSources, writePage, readPages, searchWiki,
   lintWiki, appendLog, readLog, estimateTokens, statusWorkspace, backupWorkspace,
-  parsePage, rebuildIndex, TOOLS,
+  parsePage, rebuildIndex, scanCorpus, TOOLS,
 } from './core/archivist.mjs'
 import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
 import os from 'node:os'
@@ -126,11 +126,22 @@ try {
   const stT = statusWorkspace(ws)
   ok('status: trust/supersede counts', stT.includes('trust: ') && stT.includes('superseded:1'), (stT.split('\n').find((l) => l.startsWith('trust:')) || 'missing'))
 
+  // 9c. exhaustive scan tool (exact counts, never top-K)
+  writeFileSync(path.join(ws, 'raw', 'scan-probe.md'), '# Scan Probe\n\nzzscan 出现在这里。zzscan 第二次。zzscan 第三次。\n')
+  const sc = scanCorpus(ws, 'zzscan', 'all')
+  ok('scan: exact total count', /total occurrences: 3/.test(sc), sc.split('\n')[0])
+  ok('scan: lists the matching file', sc.includes('raw/scan-probe.md'))
+  ok('scan: coverage statement', sc.includes('覆盖声明'))
+  const sc0 = scanCorpus(ws, 'zzscan-not-present', 'all')
+  ok('scan: zero-match coverage note', sc0.includes('total occurrences: 0') && sc0.includes('未命中不等于不存在'), sc0.split('\n')[0])
+  const hint = searchWiki(ws, '列出全部笔记', 5, 'wiki')
+  ok('search: exhaustive-intent hint', hint.includes('穷尽/计数类意图检测'), hint.split('\n').slice(-1)[0])
+
   // 10. status
   const st = statusWorkspace(ws)
   ok('status has pages line', st.includes('pages: '), st.split('\n')[0])
   ok('status has token estimate', /~\d+ tokens/.test(st))
-  ok('status has sources line', st.includes('sources: 2'))
+  ok('status has sources line', st.includes('sources: 3'))
 
   // 10b. tokenizer: symbol-bearing latin phrases stay searchable
   writeFileSync(path.join(ws, 'raw', 'note3.md'), '# Note3\nB+ Tree 原理；O(log n) 复杂度。\n')
@@ -164,7 +175,7 @@ try {
   const pr = parsePage('---\ntitle: A\ntags: [x, y]\n---\nbody')
   ok('frontmatter parse title', pr.fm.title === 'A' && Array.isArray(pr.fm.tags) && pr.fm.tags.length === 2, JSON.stringify(pr.fm))
   ok('token estimate positive', estimateTokens('中文abc') >= 2)
-  ok('tools table complete', TOOLS.length === 12 && TOOLS.every((t) => t.name.startsWith('archivist_')), 'count=' + TOOLS.length)
+  ok('tools table complete', TOOLS.length === 13 && TOOLS.every((t) => t.name.startsWith('archivist_')), 'count=' + TOOLS.length)
 
   console.log(`\n${pass} passed, ${fail} failed`)
   process.exitCode = fail ? 1 : 0
