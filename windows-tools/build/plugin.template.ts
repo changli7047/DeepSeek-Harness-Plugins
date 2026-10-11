@@ -16,7 +16,8 @@
  */
 
 import { spawn, type ChildProcess } from 'node:child_process'
-import { mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs'
+import { createHash } from 'node:crypto'
+import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { basename, join } from 'node:path'
 import { createInterface } from 'node:readline'
@@ -35,7 +36,31 @@ const POWERSHELL = process.env.SystemRoot !== undefined
 
 const HOST_SCRIPT = String.raw`__PS_HOST__`
 
-const HOST_SCRIPT_PATH = join(tmpdir(), 'dsh-windows-tools', 'wt-host.ps1')
+/** Content-addressed path: two plugin versions never share one helper file. */
+const HOST_SCRIPT_HASH = createHash('sha256').update(HOST_SCRIPT).digest('hex').slice(0, 16)
+
+const HOST_DIR = join(tmpdir(), 'dsh-windows-tools')
+const HOST_SCRIPT_PATH = join(HOST_DIR, `wt-host-${HOST_SCRIPT_HASH}.ps1`)
+
+/**
+ * Publish the helper with a write-to-staging-then-rename, so a concurrent
+ * reader (another session starting at the same moment) can never observe a
+ * half-written script.
+ */
+function materializeHostScript(): string {
+  mkdirSync(HOST_DIR, { recursive: true })
+  const staging = join(HOST_DIR, `wt-host-${HOST_SCRIPT_HASH}.${String(process.pid)}.tmp`)
+  writeFileSync(staging, HOST_SCRIPT, 'utf8')
+  try {
+    renameSync(staging, HOST_SCRIPT_PATH)
+  } catch (error) {
+    rmSync(staging, { force: true })
+    // The path encodes the content hash, so an existing readable file is
+    // equivalent; anything else is a real failure and must surface.
+    if (!existsSync(HOST_SCRIPT_PATH)) throw error
+  }
+  return HOST_SCRIPT_PATH
+}
 
 /** One in-flight helper call waiting for its response line. */
 interface PendingCall {
@@ -67,9 +92,8 @@ function killHost(error: Error): void {
 /** Start the helper on first use; keep it for the life of the plugin. */
 function ensureHost(): HostState {
   if (host !== undefined) return host
-  mkdirSync(join(tmpdir(), 'dsh-windows-tools'), { recursive: true })
-  writeFileSync(HOST_SCRIPT_PATH, HOST_SCRIPT, 'utf8')
-  const child = spawn(POWERSHELL, ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', HOST_SCRIPT_PATH], {
+  const scriptPath = materializeHostScript()
+  const child = spawn(POWERSHELL, ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', scriptPath], {
     windowsHide: true,
     stdio: ['pipe', 'pipe', 'pipe'],
   })
@@ -182,15 +206,16 @@ export function apply(ctx: Context): void {
 
   ctx.tools.register(defineTool({
     name: 'windows_screenshot',
-    description: 'Capture a PNG screenshot (DPI-aware, physical pixels) and return it so you can see the screen. By default the physical screen is captured; give `window` to capture one window in the background instead — this works even when that window is covered by other windows, without disturbing the user (minimized windows are not supported). Give x, y, width, height for a region and scale (1-4) to enlarge small text or icons; in window mode the region is relative to the captured window image. Prefer windows_snapshot when you need interactive element coordinates, because a screenshot shows pixels only.',
+    description: 'Capture a PNG screenshot (DPI-aware, physical pixels) and return it so you can see the screen. By default the physical screen is captured; give `window` to capture one window in the background instead — this works even when that window is covered by other windows, without disturbing the user (minimized windows are not supported). Give x, y, width, height for a region and scale (1-4) to enlarge small text or icons; in window mode the region is relative to the captured window image. A region must be given completely: x, y, width and height together, never a subset. An existing filePath is refused unless overwrite is true. Prefer windows_snapshot when you need interactive element coordinates, because a screenshot shows pixels only.',
     parameters: {
-      filePath: { type: 'string', description: 'Optional absolute path for the PNG file; defaults to a timestamped file under the system temporary directory.' },
+      filePath: { type: 'string', description: 'Optional absolute path for the PNG file; must end with .png and must not already exist unless overwrite is true. Defaults to a fresh timestamped file under the system temporary directory.' },
+      overwrite: { type: 'boolean', description: 'Allow replacing an existing file at filePath; defaults to false, in which case the call fails instead of overwriting.' },
       attachImage: { type: 'boolean', description: 'Set false to skip returning the image and only save the file; defaults to true.' },
       window: { type: 'string', description: 'Optional window target: title substring, process name (e.g. Weixin), or PID. Captures that window in the background instead of the screen.' },
-      x: { type: 'integer', description: 'Optional region left edge in screen pixels.' },
-      y: { type: 'integer', description: 'Optional region top edge in screen pixels.' },
-      width: { type: 'integer', description: 'Optional region width; requires x and y.' },
-      height: { type: 'integer', description: 'Optional region height; requires x and y.' },
+      x: { type: 'integer', description: 'Optional region left edge; requires y, width and height as well.' },
+      y: { type: 'integer', description: 'Optional region top edge; requires x, width and height as well.' },
+      width: { type: 'integer', description: 'Optional region width; requires x, y and height as well.' },
+      height: { type: 'integer', description: 'Optional region height; requires x, y and width as well.' },
       scale: { type: 'number', description: 'Optional enlargement factor 1-4 applied to the captured image; defaults to 1.' },
     },
     output: {
@@ -235,13 +260,14 @@ export function apply(ctx: Context): void {
       const path = args.filePath ?? defaultScreenshotPath()
       const request: Record<string, unknown> = { cmd: 'screenshot', path }
       if (args.window !== undefined) request.window = args.window
-      if (args.x !== undefined && args.y !== undefined && args.width !== undefined && args.height !== undefined) {
-        request.x = args.x
-        request.y = args.y
-        request.width = args.width
-        request.height = args.height
-      }
+      // Forward region arguments one by one: the helper rejects a partial set
+      // instead of silently capturing the whole screen.
+      if (args.x !== undefined) request.x = args.x
+      if (args.y !== undefined) request.y = args.y
+      if (args.width !== undefined) request.width = args.width
+      if (args.height !== undefined) request.height = args.height
       if (args.scale !== undefined) request.scale = args.scale
+      if (args.overwrite === true) request.overwrite = true
       const response = await callHost(request, 45000)
       const geometry = /^saved: (.+)\|width:(\d+)\|height:(\d+)\|scale:([0-9.]+)\|source:/.exec(response)
       if (geometry === null) throw new Error(`screenshot helper returned an unexpected result: ${response}`)
@@ -471,14 +497,14 @@ export function apply(ctx: Context): void {
 
   ctx.tools.register(defineTool({
     name: 'windows_wait_for',
-    description: 'Wait until a desktop condition becomes true instead of sleeping blindly, then return; it fails with a timeout error when the condition never appears. Conditions: foreground (the foreground window title contains `value`), window (any visible window title contains `value`), pixel (the screen pixel at x, y changes from its color at call time), region (the average pixel difference inside x, y, width, height exceeds `threshold`, default 20; works for web-style UI that never changes window titles), settle (the region — or the whole screen when omitted — stays unchanged for `stableFrames` consecutive frames, default 3; use after any action to wait for rendering to finish).',
+    description: 'Wait until a desktop condition becomes true instead of sleeping blindly, then return; it fails with a timeout error when the condition never appears. Conditions: foreground (the foreground window title contains `value`), window (any visible window title contains `value`), pixel (the screen pixel at x, y changes from its color at call time), region (the average pixel difference inside x, y, width, height exceeds `threshold`, default 20; works for web-style UI that never changes window titles), settle (the region — or the whole screen when omitted — stays unchanged for `stableFrames` consecutive frames, default 3; use after any action to wait for rendering to finish). The region conditions take x, y, width and height together or not at all.',
     parameters: {
       kind: { type: 'string', enum: ['foreground', 'window', 'pixel', 'region', 'settle'], required: true, description: 'Condition to wait for.' },
-      value: { type: 'string', description: 'Title substring for foreground/window conditions; unused otherwise.' },
-      x: { type: 'integer', description: 'Screen x coordinate: the pixel for kind pixel, or the region left edge for kind region/settle.' },
-      y: { type: 'integer', description: 'Screen y coordinate: the pixel for kind pixel, or the region top edge for kind region/settle.' },
-      width: { type: 'integer', description: 'Region width for kind region/settle; omit to watch the whole screen.' },
-      height: { type: 'integer', description: 'Region height for kind region/settle; omit to watch the whole screen.' },
+      value: { type: 'string', description: 'Title substring for the foreground/window conditions: required and must not be empty for those kinds, unused otherwise.' },
+      x: { type: 'integer', description: 'Screen x coordinate: the pixel for kind pixel, or the region left edge for kind region/settle (all four region values must be given together).' },
+      y: { type: 'integer', description: 'Screen y coordinate: the pixel for kind pixel, or the region top edge for kind region/settle (all four region values must be given together).' },
+      width: { type: 'integer', description: 'Region width for kind region/settle; omit all four region values to watch the whole screen.' },
+      height: { type: 'integer', description: 'Region height for kind region/settle; omit all four region values to watch the whole screen.' },
       threshold: { type: 'number', description: 'Average pixel-difference threshold for kind region; defaults to 20.' },
       stableFrames: { type: 'number', description: 'Consecutive unchanged frames required by kind settle; defaults to 3.' },
       timeoutSeconds: { type: 'number', description: 'Maximum wait in seconds; defaults to 10, capped at 60.' },

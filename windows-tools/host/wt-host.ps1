@@ -425,6 +425,45 @@ function Get-WtScreenshotSource($req) {
   return @{ bitmap = $screen; label = 'screen' }
 }
 
+# Strict opt-in flag: only boolean true or the string "true" enable a
+# destructive option, so a "false" string (or 1 / "yes") can never overwrite.
+function Test-WtExplicitTrue($value) {
+  if ($null -eq $value) { return $false }
+  if ($value -is [bool]) { return [bool]$value }
+  return ([string]$value).Trim().ToLowerInvariant() -eq 'true'
+}
+
+# Foreground mouse paths act on the real desktop, so the point must be inside
+# the virtual screen before any native call is made.
+function Assert-WtPointInVirtualScreen([int]$x, [int]$y) {
+  $vs = [System.Windows.Forms.SystemInformation]::VirtualScreen
+  if ($x -lt $vs.Left -or $x -ge ($vs.Left + $vs.Width) -or $y -lt $vs.Top -or $y -ge ($vs.Top + $vs.Height)) {
+    throw ('point {0},{1} is outside the virtual desktop ({2},{3} {4}x{5})' -f $x, $y, $vs.Left, $vs.Top, $vs.Width, $vs.Height)
+  }
+}
+
+# Region arguments are all-or-nothing: a partial set must fail loudly instead of
+# silently falling back to the full image or to a (0,0) origin. Screenshot
+# regions are 0-based pixels of the captured image; wait_for regions are
+# virtual-desktop pixels whose origin can be negative on a multi-monitor layout,
+# so those are checked against the virtual screen instead.
+function Assert-WtRegionArgs($req, [switch]$ScreenRelative) {
+  $given = @()
+  foreach ($name in @('x', 'y', 'width', 'height')) { if ($null -ne $req.$name) { $given += $name } }
+  if ($given.Count -eq 0) { return $false }
+  if ($given.Count -ne 4) {
+    throw ('region needs all of x, y, width and height (got only: {0}); pass all four or none' -f ($given -join ', '))
+  }
+  $rx = [int]$req.x
+  $ry = [int]$req.y
+  $rw = [int]$req.width
+  $rh = [int]$req.height
+  if ($rw -le 0 -or $rh -le 0) { throw ('region width and height must be positive (got {0}x{1})' -f $rw, $rh) }
+  if ($ScreenRelative) { Assert-WtPointInVirtualScreen $rx $ry }
+  elseif ($rx -lt 0 -or $ry -lt 0) { throw ('region x and y must not be negative: screenshot regions are 0-based pixels of the captured image (got {0},{1})' -f $rx, $ry) }
+  return $true
+}
+
 function Save-WtScreenshot($req) {
   $path = [string]$req.path
   if ([string]::IsNullOrWhiteSpace($path)) {
@@ -432,23 +471,35 @@ function Save-WtScreenshot($req) {
     if (-not (Test-Path $shotDir)) { New-Item -ItemType Directory -Path $shotDir -Force | Out-Null }
     $path = Join-Path $shotDir ('screenshot-{0}.png' -f (Get-Date -Format 'yyyyMMdd-HHmmss-fff'))
   }
+  # Refuse to replace an existing file unless the caller asked for it, and never
+  # write anything but a .png (an existing file is left untouched on refusal).
+  if ([System.IO.Path]::GetExtension($path) -ne '.png') {
+    throw ('screenshot path must end with .png (got: {0})' -f $path)
+  }
+  if ((Test-Path -LiteralPath $path) -and -not (Test-WtExplicitTrue $req.overwrite)) {
+    throw ('screenshot target already exists: {0}; pass overwrite=true to replace it' -f $path)
+  }
+  $hasRegion = Assert-WtRegionArgs $req
   $source = Get-WtScreenshotSource $req
   $owned = New-Object System.Collections.Generic.List[object]
   try {
     $bitmap = $source.bitmap
     [void]$owned.Add($bitmap)
-    if ($null -ne $req.width -and $null -ne $req.height) {
+    $clipNote = ''
+    if ($hasRegion) {
       $regionX = [int]$req.x
       $regionY = [int]$req.y
       $regionW = [int]$req.width
       $regionH = [int]$req.height
-      if ($regionW -le 0 -or $regionH -le 0) { throw 'screenshot region must have positive width and height' }
-      $left = [Math]::Max($regionX, 0)
-      $top = [Math]::Max($regionY, 0)
       $right = [Math]::Min($regionX + $regionW, $bitmap.Width)
       $bottom = [Math]::Min($regionY + $regionH, $bitmap.Height)
-      if ($right -le $left -or $bottom -le $top) { throw 'screenshot region does not intersect the captured image' }
-      $cropped = $bitmap.Clone((New-Object System.Drawing.Rectangle $left, $top, ($right - $left), ($bottom - $top)), $bitmap.PixelFormat)
+      if ($right -le $regionX -or $bottom -le $regionY) {
+        throw ('screenshot region {0},{1} {2}x{3} does not intersect the captured image ({4}x{5})' -f $regionX, $regionY, $regionW, $regionH, $bitmap.Width, $bitmap.Height)
+      }
+      if (($right - $regionX) -ne $regionW -or ($bottom - $regionY) -ne $regionH) {
+        $clipNote = '|clipped:{0},{1} {2}x{3}' -f $regionX, $regionY, ($right - $regionX), ($bottom - $regionY)
+      }
+      $cropped = $bitmap.Clone((New-Object System.Drawing.Rectangle $regionX, $regionY, ($right - $regionX), ($bottom - $regionY)), $bitmap.PixelFormat)
       [void]$owned.Add($cropped)
       $bitmap = $cropped
     }
@@ -471,7 +522,7 @@ function Save-WtScreenshot($req) {
     $dir = Split-Path -Parent $path
     if (-not (Test-Path $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
     $final.Save($path, [System.Drawing.Imaging.ImageFormat]::Png)
-    return ('saved: {0}|width:{1}|height:{2}|scale:{3}|source:{4}' -f $path, $final.Width, $final.Height, $scale, $source.label)
+    return ('saved: {0}|width:{1}|height:{2}|scale:{3}|source:{4}{5}' -f $path, $final.Width, $final.Height, $scale, $source.label, $clipNote)
   } finally {
     foreach ($item in $owned) {
       try { $item.Dispose() } catch { }
@@ -558,7 +609,10 @@ function Get-WtHitDescription([int]$x, [int]$y) {
 }
 
 function Move-WtTo([int]$x, [int]$y) {
-  [void][WtNative]::SetCursorPos($x, $y)
+  Assert-WtPointInVirtualScreen $x $y
+  if (-not [WtNative]::SetCursorPos($x, $y)) {
+    throw ('SetCursorPos({0},{1}) failed: the point could not be reached (locked or disconnected session?)' -f $x, $y)
+  }
   Start-Sleep -Milliseconds 20
 }
 
@@ -665,7 +719,8 @@ function Invoke-WtBackgroundType($found, [string]$text) {
   try { $procName = (Get-Process -Id $found.ProcessId -ErrorAction Stop).ProcessName } catch { }
   if ($procName -eq 'Weixin') {
     # WeChat's custom input stack decodes WM_CHAR as legacy ANSI bytes, not UTF-16.
-    $bytes = [System.Text.Encoding]::Default.GetBytes($text)
+    # Pin code page 936 explicitly: Encoding.Default is GBK only on a zh-CN host.
+    $bytes = [System.Text.Encoding]::GetEncoding(936).GetBytes($text)
     foreach ($b in $bytes) {
       [void][WtNative]::PostMessage($hwnd, 0x0102, [IntPtr][int]$b, [IntPtr]::Zero)
       Start-Sleep -Milliseconds 8
@@ -787,11 +842,17 @@ function Invoke-WtMouse($req) {
       $fy = [int]$req.fromY
       $tx = [int]$req.x
       $ty = [int]$req.y
+      Assert-WtPointInVirtualScreen $tx $ty
       Move-WtTo $fx $fy
       [WtNative]::mouse_event(0x0002, 0, 0, 0, [UIntPtr]::Zero)
       Start-Sleep -Milliseconds 80
       for ($i = 1; $i -le 12; $i++) {
-        [void][WtNative]::SetCursorPos([int]($fx + ($tx - $fx) * $i / 12), [int]($fy + ($ty - $fy) * $i / 12))
+        $stepX = [int]($fx + ($tx - $fx) * $i / 12)
+        $stepY = [int]($fy + ($ty - $fy) * $i / 12)
+        if (-not [WtNative]::SetCursorPos($stepX, $stepY)) {
+          [WtNative]::mouse_event(0x0004, 0, 0, 0, [UIntPtr]::Zero)
+          throw ('SetCursorPos({0},{1}) failed during the drag; the left button was released' -f $stepX, $stepY)
+        }
         Start-Sleep -Milliseconds 15
       }
       Start-Sleep -Milliseconds 60
@@ -1118,12 +1179,17 @@ function Invoke-WtWaitFor($req) {
   $kind = [string]$req.kind
   $value = ''
   if ($null -ne $req.value) { $value = [string]$req.value }
+  # An empty title substring matches every window, so it would report success
+  # after 0 ms instead of waiting for the intended window to appear.
+  if (($kind -eq 'foreground' -or $kind -eq 'window') -and [string]::IsNullOrWhiteSpace($value)) {
+    throw ('wait_for kind "{0}" needs a non-empty value (the title substring to wait for)' -f $kind)
+  }
   $vs = [System.Windows.Forms.SystemInformation]::VirtualScreen
   $regionX = $vs.Left
   $regionY = $vs.Top
   $regionW = $vs.Width
   $regionH = $vs.Height
-  if ($null -ne $req.width -and $null -ne $req.height) {
+  if (($kind -eq 'region' -or $kind -eq 'settle') -and (Assert-WtRegionArgs $req -ScreenRelative)) {
     $regionX = [int]$req.x
     $regionY = [int]$req.y
     $regionW = [int]$req.width

@@ -48,9 +48,13 @@ const WIKI = 'wiki'
 const SCHEMA_FILE = 'AGENTS.md'
 const MANIFEST = path.posix.join(WIKI, '.ingest-manifest.json')
 const BACKUP_PREFIX = 'archivist-'
+// Only directories this plugin created (stamp() + optional collision suffix) may be rotated away.
+const SNAPSHOT_RE = /^archivist-\d{8}-\d{9,}(-\d+)?$/
 const DEFAULT_KEEP = 10
 const READ_CHAR_CAP = 120000
 const EXCLUDE_RE = /(^|\/)(\.backups|\.git|node_modules)(\/|$)/
+const RAW_EXTS = /\.(md|txt|json|csv|ya?ml)$/i
+const RAW_SIZE_CAP = 2 * 1024 * 1024
 
 // ---------------------------------------------------------------- helpers
 
@@ -236,7 +240,7 @@ last_updated: YYYY-MM-DD（由 archivist_write 自动填）
 3. 只写决策/结论/方法，不搬运流水账；没有 raw 出处的页默认 trust=low
 
 ### Query（提问）
-1. \`archivist_search\` 取前 10–15 个相关页；结果会标注 \`低信任\` / \`已被 xxx 替代\`，已撤回页自动排除；**穷尽/计数类问题（全部/从未/多少）改用 \`archivist_scan\`**（精确计数 + 完整清单 + 覆盖声明）
+1. \`archivist_search\` 取前 10–15 个相关页；结果会标注 \`低信任\` / \`已被 xxx 替代\`，已撤回页自动排除；**穷尽/计数类问题（全部/从未/多少）改用 \`archivist_scan\`**（精确计数 + 命中文件清单：≤60 个全列，超出时明示截断与未显示条数、计数与文件数仍准确 + 覆盖声明：被跳过的文件与原因一并列出）
 2. \`archivist_read\` 精读命中页（可顺 wikilink 多跳）；低信任页只作导航，关键事实回读 \`sources\` 指向的 raw 原文验证，或在回答中声明来源级别
 3. 基于页面回答并引用页面路径；答案有价值时 \`archivist_write\` 存到 \`syntheses/\`
 4. \`archivist_log\` 追加：\`query | <问题>\`
@@ -364,6 +368,46 @@ function rawCacheEntry(abs) {
   return { entry }
 }
 
+// A file that is left out must never disappear silently: search and scan both
+// report how many files they skipped and by which rule, so no output can claim a
+// complete corpus while quietly ignoring part of it.
+const SKIP_LABEL = { extension: '扩展名不在白名单', size: '超过 2MB', unreadable: '无法读取' }
+function skipCount(skips) { return Object.values(skips).reduce((n, files) => n + files.length, 0) }
+function describeSkips(skips) {
+  return Object.entries(skips)
+    .filter(([, files]) => files.length)
+    .map(([reason, files]) => `${SKIP_LABEL[reason] || reason} ${files.length} 个 (${files.slice(0, 3).join(', ')}${files.length > 3 ? ', …' : ''})`)
+    .join('; ')
+}
+
+/**
+ * Read every eligible raw/ document once, for both search and scan, and record why
+ * each remaining file was left out (extension whitelist / 2MB cap / unreadable).
+ *
+ * 0-byte files are classified BEFORE those filters and counted as scanned-but-empty:
+ * an empty file cannot contain any match, so leaving it out is not a coverage gap,
+ * unlike a filtered non-empty file which may hide matches. This keeps placeholders
+ * such as raw/.gitkeep (created by archivist_init) out of the skip list, so the
+ * disclosure stays a real signal instead of permanent noise users learn to ignore.
+ */
+function readRawDocs(dir) {
+  const docs = []
+  const skips = { extension: [], size: [], unreadable: [] }
+  for (const f of walkFiles(path.join(dir, 'raw'))) {
+    const rel = toPosixRel(dir, f)
+    const hit = rawCacheEntry(f)
+    if (!hit) { skips.unreadable.push(rel); continue }
+    if (hit.entry.size === 0) { docs.push({ rel, text: '' }); continue }
+    if (!RAW_EXTS.test(rel)) { skips.extension.push(rel); continue }
+    if (hit.entry.size > RAW_SIZE_CAP) { skips.size.push(rel); continue }
+    if (!hit.entry.text) {
+      try { hit.entry.text = readFileSync(f, 'utf8') } catch { skips.unreadable.push(rel); continue }
+    }
+    docs.push({ rel, text: hit.entry.text })
+  }
+  return { docs, skips }
+}
+
 export function listSources(dir) {
   const rawDir = path.join(dir, 'raw')
   const manifest = (() => {
@@ -385,13 +429,15 @@ export function listSources(dir) {
   return out
 }
 
-function recordIngest(dir, rawRel, pageRel) {
+/**
+ * Manifest write only: writePage validates the path and hashes the file before the
+ * page is written, so a rejected ingest can no longer leave a page behind.
+ */
+function recordIngest(dir, rawRel, pageRel, sha) {
   const mf = (() => {
     try { return JSON.parse(readFileSync(path.join(dir, MANIFEST), 'utf8')) } catch { return {} }
   })()
-  const absRaw = path.join(dir, rawRel)
-  if (!existsSync(absRaw)) throw new Error(`source file not found: ${rawRel}`)
-  mf[rawRel] = { hash: sha16(readFileSync(absRaw)), page: pageRel, at: new Date().toISOString() }
+  mf[rawRel] = { hash: sha, page: pageRel, at: new Date().toISOString() }
   writeFileSync(path.join(dir, MANIFEST), JSON.stringify(mf, null, 2))
 }
 
@@ -475,27 +521,48 @@ export function writePage(dir, args) {
   }
   if (typeof fm.title !== 'string' || !fm.title.trim()) throw new Error('page title is required')
   if (!body.trim()) body = existing.body.trim() ? existing.body : `# ${fm.title}\n`
+
+  // Validate every input before the first byte reaches the disk: sourceFile and
+  // supersedes used to be checked after the page had been renamed into place, so a
+  // rejected write left a half-finished page behind.
+  let ingest = null
+  if (args.sourceFile) {
+    const rawGiven = fwd(String(args.sourceFile))
+    // Resolve first, then guard the absolute path against raw/: that accepts the
+    // documented "raw/foo.md" form and rejects both escapes and in-workspace paths
+    // that listSources (raw/ only) could never see again.
+    const rawAbs = path.resolve(dir, rawGiven)
+    if (!inside(path.join(dir, 'raw'), rawAbs)) throw new Error('sourceFile must stay inside raw/: ' + rawGiven)
+    let rawFile = null
+    try { rawFile = statSync(rawAbs).isFile() ? rawAbs : null } catch { /* missing */ }
+    if (!rawFile) throw new Error(`source file not found: ${rawGiven}`)
+    ingest = { rel: toPosixRel(dir, rawFile), sha: sha16(readFileSync(rawFile)) }
+  }
+  let supersede = null
+  if (args.supersedes !== undefined) {
+    const oldRel = fwd(String(args.supersedes)).replace(/^wiki\//, '')
+    if (!inside(path.join(dir, WIKI), oldRel)) throw new Error('supersedes path must stay inside wiki/: ' + oldRel)
+    const oldAbs = path.join(dir, WIKI, oldRel)
+    if (!existsSync(oldAbs)) throw new Error(`supersedes target not found: wiki/${oldRel}`)
+    supersede = { rel: oldRel, abs: oldAbs, page: parsePage(readFileSync(oldAbs, 'utf8')) }
+  }
+
   const text = serializePage(fm, body.trim() + '\n')
   const tmp = abs + '.tmp'
   ensureDir(path.dirname(abs))
   writeFileSync(tmp, text)
   renameSync(tmp, abs)
   let logNote = ''
-  if (args.sourceFile) {
-    recordIngest(dir, fwd(String(args.sourceFile)), fwd(path.posix.join(WIKI, rel)))
+  if (ingest) {
+    recordIngest(dir, ingest.rel, fwd(path.posix.join(WIKI, rel)), ingest.sha)
     logNote = ' | source marked ingested'
   }
   let superNote = ''
-  if (args.supersedes !== undefined) {
-    const oldRel = fwd(String(args.supersedes)).replace(/^wiki\//, '')
-    if (!inside(path.join(dir, WIKI), oldRel)) throw new Error('supersedes path must stay inside wiki/: ' + oldRel)
-    const oldAbs = path.join(dir, WIKI, oldRel)
-    if (!existsSync(oldAbs)) throw new Error(`supersedes target not found: wiki/${oldRel}`)
-    const old = parsePage(readFileSync(oldAbs, 'utf8'))
-    const oldFm = { ...old.fm, status: 'superseded', superseded_by: rel, last_updated: today() }
-    writeFileSync(oldAbs, serializePage(oldFm, old.body.trimEnd() + '\n'))
-    appendLog(dir, `supersede | wiki/${rel} ← wiki/${oldRel}`)
-    superNote = ` | superseded wiki/${oldRel}`
+  if (supersede) {
+    const oldFm = { ...supersede.page.fm, status: 'superseded', superseded_by: rel, last_updated: today() }
+    writeFileSync(supersede.abs, serializePage(oldFm, supersede.page.body.trimEnd() + '\n'))
+    appendLog(dir, `supersede | wiki/${rel} ← wiki/${supersede.rel}`)
+    superNote = ` | superseded wiki/${supersede.rel}`
   }
   let idxNote = ''
   if (args.index !== false) { rebuildIndex(dir); idxNote = ' | index rebuilt' }
@@ -636,26 +703,20 @@ function scoreDocuments(docs, tokens) {
 export function searchWiki(dir, query, limit = 15, scope = 'wiki') {
   const tokens = tokenizeQuery(query)
   const results = []
+  let skipNote = ''
   if (scope === 'raw' || scope === 'all') {
-    const docs = []
-    for (const f of walkFiles(path.join(dir, 'raw'))) {
-      const rel = toPosixRel(dir, f)
-      if (!/\.(md|txt|json|csv|ya?ml)$/i.test(rel)) continue
-      const hit = rawCacheEntry(f)
-      if (!hit) continue
-      if (hit.entry.size > 2 * 1024 * 1024) continue
-      if (!hit.entry.text) {
-        try { hit.entry.text = readFileSync(f, 'utf8') } catch { continue }
-      }
-      docs.push({
-        label: rel,
-        title: path.posix.basename(rel, '.md'),
-        text: hit.entry.text,
-        lower: hit.entry.text.toLowerCase(),
-        name: path.posix.basename(rel).toLowerCase(),
-      })
+    const { docs, skips } = readRawDocs(dir)
+    const skipped = skipCount(skips)
+    if (skipped) {
+      skipNote = `\n\n覆盖声明：raw/ 有 ${skipped} 个文件未纳入检索（${describeSkips(skips)}），结果只覆盖其余 ${docs.length} 个文件。`
     }
-    results.push(...scoreDocuments(docs, tokens))
+    results.push(...scoreDocuments(docs.map((d) => ({
+      label: d.rel,
+      title: path.posix.basename(d.rel, '.md'),
+      text: d.text,
+      lower: d.text.toLowerCase(),
+      name: path.posix.basename(d.rel).toLowerCase(),
+    })), tokens))
   }
   if (scope === 'wiki' || scope === 'all') {
     const docs = listPages(dir)
@@ -682,7 +743,7 @@ export function searchWiki(dir, query, limit = 15, scope = 'wiki') {
     ? `\n\n⚠ 穷尽/计数类意图检测：top-K 结果不能代表全库；请用 archivist_scan 获取精确计数与完整文件清单，并在回答中声明覆盖范围。`
     : ''
   if (!top.length) {
-    return `no match for "${query}" (scope: ${scope}). Try other keywords, widen scope to 'all', or read wiki/index.md / wiki/overview.md directly.${exhaustHint}`
+    return `no match for "${query}" (scope: ${scope}). Try other keywords, widen scope to 'all', or read wiki/index.md / wiki/overview.md directly.${exhaustHint}${skipNote}`
   }
   return top.map((r, i) => {
     const marks = []
@@ -690,7 +751,7 @@ export function searchWiki(dir, query, limit = 15, scope = 'wiki') {
     if (r.trust === 'low') marks.push('低信任')
     const mark = marks.length ? `（${marks.join('；')}）` : ''
     return `${i + 1}. [${Math.round(r.score * 10) / 10}] ${r.label} — ${r.title}${mark}${r.summary ? ' | ' + r.summary : ''}\n   ${r.snippet}`
-  }).join('\n') + exhaustHint
+  }).join('\n') + exhaustHint + skipNote
 }
 
 // ---------------------------------------------------------------- scan
@@ -726,19 +787,14 @@ export function scanCorpus(dir, query, scope = 'all') {
   const rows = []
   let total = 0
   let scanned = 0
+  let skips = {}
   if (scope === 'raw' || scope === 'all') {
-    for (const f of walkFiles(path.join(dir, 'raw'))) {
-      const rel = toPosixRel(dir, f)
-      if (!/\.(md|txt|json|csv|ya?ml)$/i.test(rel)) continue
-      const hit = rawCacheEntry(f)
-      if (!hit) continue
-      if (hit.entry.size > 2 * 1024 * 1024) continue
-      if (!hit.entry.text) {
-        try { hit.entry.text = readFileSync(f, 'utf8') } catch { continue }
-      }
+    const read = readRawDocs(dir)
+    skips = read.skips
+    for (const doc of read.docs) {
       scanned++
-      const c = countAll(hit.entry.text.toLowerCase(), needle)
-      if (c > 0) { total += c; rows.push({ label: rel, count: c }) }
+      const c = countAll(doc.text.toLowerCase(), needle)
+      if (c > 0) { total += c; rows.push({ label: doc.rel, count: c }) }
     }
   }
   if (scope === 'wiki' || scope === 'all') {
@@ -751,15 +807,23 @@ export function scanCorpus(dir, query, scope = 'all') {
   }
   rows.sort((a, b) => b.count - a.count)
   const scopeText = scope === 'raw' ? 'raw/' : scope === 'wiki' ? 'wiki/' : 'raw/ + wiki/'
-  const head = `scan "${query}" (scope ${scope}): matched in ${rows.length} of ${scanned} file(s); total occurrences: ${total}`
+  const skipped = skipCount(skips)
+  const head = `scan "${query}" (scope ${scope}): matched in ${rows.length} of ${scanned} scanned file(s)`
+    + `${skipped ? ` (+${skipped} raw file(s) skipped, see 覆盖声明)` : ''}; total occurrences: ${total}`
+  // Never claim a complete list while part of the corpus was left out.
+  const coverage = skipped
+    ? `已扫描 ${scopeText} ${scanned} 个符合条件的文件；未纳入 ${describeSkips(skips)} —— 本清单与计数不覆盖这些文件。`
+    : `已扫描 ${scopeText} 全部 ${scanned} 个符合扩展名的文件。`
   if (!rows.length) {
-    return `${head}\n覆盖声明：已扫描 ${scopeText} 全部符合扩展名的文件。未命中不等于不存在——检查拼写、别名或其他工作区。`
+    return `${head}\n覆盖声明：${coverage}未命中不等于不存在——检查拼写、别名或其他工作区。`
   }
   const shown = rows.slice(0, 60)
   const list = shown.map((r) => `- ${r.label} × ${r.count}`).join('\n')
-  const more = rows.length > 60 ? `\n…(完整清单还有 ${rows.length - 60} 个文件未显示；计数不受影响)` : ''
-  const truncNote = rows.length > 60 ? '（清单截断，计数与文件数准确）' : '（完整清单）'
-  return `${head}\n${list}${more}\n覆盖声明：以上为全部命中文件${truncNote}。穷尽/统计类问题以此计数为准，不要用 top-K 检索结果代替。`
+  const more = rows.length > 60 ? `\n…(另有 ${rows.length - 60} 个命中文件未显示；计数不受影响)` : ''
+  const truncNote = rows.length > 60
+    ? '（清单截断，计数与文件数准确）'
+    : (skipped ? '（命中文件已全列，但未覆盖跳过文件）' : '（完整清单）')
+  return `${head}\n${list}${more}\n覆盖声明：以上为全部命中文件${truncNote}。${coverage}穷尽/统计类问题以此计数为准，不要用 top-K 检索结果代替。`
 }
 
 // ---------------------------------------------------------------- lint
@@ -870,10 +934,13 @@ export function appendLog(dir, line) {
   return `logged: ${entry.trim()}`
 }
 export function readLog(dir, n = 5) {
+  // `slice(-0)` would return the whole log, so 0 must be handled explicitly.
+  const take = Number.isFinite(Number(n)) ? Math.max(0, Math.trunc(Number(n))) : 5
+  if (take === 0) return 'log: 0 entries requested — nothing to show'
   try {
     const text = readFileSync(path.join(dir, WIKI, 'log.md'), 'utf8')
     const entries = text.split(/^## /m).slice(1).map((s) => '## ' + s.trim())
-    return entries.slice(-n).join('\n\n') || 'log is empty'
+    return entries.slice(-take).join('\n\n') || 'log is empty'
   } catch { return 'log is empty' }
 }
 
@@ -927,6 +994,10 @@ export function statusWorkspace(dir) {
 export function backupWorkspace(dir, target, keep = DEFAULT_KEEP) {
   const base = target ? path.resolve(target) : path.join(dir, '.backups')
   ensureDir(base)
+  // `keep: 0` is a number, not a missing option — but never below one snapshot:
+  // deleting the snapshot we just wrote would make the receipt a lie.
+  const requested = Number(keep)
+  const keepN = Number.isFinite(requested) ? Math.max(1, Math.trunc(requested)) : DEFAULT_KEEP
   let name = BACKUP_PREFIX + stamp()
   let n = 1
   while (existsSync(path.join(base, name))) { n++; name = BACKUP_PREFIX + stamp() + '-' + n }
@@ -953,15 +1024,26 @@ export function backupWorkspace(dir, target, keep = DEFAULT_KEEP) {
   writeFileSync(path.join(dest, 'backup-manifest.json'), JSON.stringify(
     { source: dir, createdAt: new Date().toISOString(), files, bytes }, null, 2,
   ))
-  // rotate
-  const snapshots = readdirSync(base).filter((e) => e.startsWith(BACKUP_PREFIX)).sort()
+  // Rotate only directories that strictly match our own snapshot naming scheme:
+  // the target directory is often the user's own space (another drive / cloud
+  // folder), so a look-alike name must never be deleted.
+  const snapshots = []
+  const unrecognized = []
+  for (const e of readdirSync(base, { withFileTypes: true })) {
+    if (!e.name.startsWith(BACKUP_PREFIX)) continue
+    if (e.isDirectory() && SNAPSHOT_RE.test(e.name)) snapshots.push(e.name)
+    else unrecognized.push(e.name)
+  }
+  snapshots.sort()
   let rotated = 0
-  while (snapshots.length > keep) {
-    const victim = snapshots.shift()
-    rmSync(path.join(base, victim), { recursive: true, force: true })
+  while (snapshots.length > keepN) {
+    rmSync(path.join(base, snapshots.shift()), { recursive: true })
     rotated++
   }
-  return `backup: ${dest} (files: ${files}, bytes: ${bytes})${rotated ? ` | rotated ${rotated} old snapshot(s), keep=${keep}` : ''}`
+  const skipNote = unrecognized.length
+    ? ` | skipped ${unrecognized.length} unrecognized entr${unrecognized.length === 1 ? 'y' : 'ies'} (not deleted): ${unrecognized.slice(0, 5).join(', ')}${unrecognized.length > 5 ? ', …' : ''}`
+    : ''
+  return `backup: ${dest} (files: ${files}, bytes: ${bytes})${rotated ? ` | rotated ${rotated} old snapshot(s), keep=${keepN}` : ''}${skipNote}`
 }
 
 // ---------------------------------------------------------------- git (optional)
@@ -974,13 +1056,19 @@ export function commitWorkspace(dir, message) {
   if (git.status !== 0 || !/true/.test(git.stdout)) {
     throw new Error(`${dir} is not a git repository — run "git init" there first, or use archivist_backup instead`)
   }
-  const add = spawnSync('git', ['add', '-A'], { cwd: dir, encoding: 'utf8' })
+  // Pathspec "." keeps the staging area inside the workspace: `git add -A` alone
+  // covers the whole work tree, which would sweep in unrelated files when the wiki
+  // is only a subdirectory of an existing repository.
+  const add = spawnSync('git', ['add', '-A', '--', '.'], { cwd: dir, encoding: 'utf8' })
   if (add.status !== 0) throw new Error('git add failed: ' + (add.stderr || '').trim())
   const msg = String(message || `wiki: update ${new Date().toISOString()}`)
-  const commit = spawnSync('git', ['commit', '-m', msg], { cwd: dir, encoding: 'utf8' })
+  // Same pathspec on the commit: with a nested workspace, `git commit` alone would
+  // also commit whatever the user had already staged in the parent repository.
+  const commit = spawnSync('git', ['commit', '-m', msg, '--', '.'], { cwd: dir, encoding: 'utf8' })
   const out = ((commit.stdout || '') + (commit.stderr || '')).trim()
-  if (commit.status !== 0 && !/nothing to commit/i.test(out)) throw new Error('git commit failed: ' + out)
-  return /nothing to commit/i.test(out) ? 'git: nothing to commit' : `git: committed — ${msg}`
+  const nothing = /nothing to commit|no changes added to commit/i.test(out)
+  if (commit.status !== 0 && !nothing) throw new Error('git commit failed: ' + out)
+  return nothing ? 'git: nothing to commit' : `git: committed — ${msg}`
 }
 
 // ---------------------------------------------------------------- tool table
@@ -1050,7 +1138,7 @@ export const TOOLS = [
   },
   {
     name: 'archivist_scan',
-    description: 'Deterministic full-corpus scan (no top-K truncation): counts EXACT occurrences of a substring across raw/ and/or wiki/ and lists every matching file, with a coverage statement. Use for exhaustive or counting questions ("all", "every", "how many", "list all") and state the coverage in the answer; use archivist_search for relevance-ranked lookup instead.',
+    description: 'Deterministic full-corpus scan (no top-K truncation): counts EXACT occurrences of a substring across raw/ and/or wiki/ and lists the matching files (up to 60 rows; beyond that the list is explicitly marked truncated with the number of files not shown, while the occurrence count and the matched-file count stay exact), plus a coverage statement. Use for exhaustive or counting questions ("all", "every", "how many", "list all") and state the coverage in the answer; use archivist_search for relevance-ranked lookup instead.',
     schema: {
       type: 'object',
       properties: {
@@ -1142,7 +1230,7 @@ export const TOOLS = [
     run: (a) => {
       const dir = resolveDir(a.workspace)
       requireWiki(dir)
-      return a.read ? readLog(dir, Number(a.read)) : appendLog(dir, String(a.line || 'update'))
+      return a.read !== undefined ? readLog(dir, Number(a.read)) : appendLog(dir, String(a.line || 'update'))
     },
   },
   {
@@ -1152,12 +1240,12 @@ export const TOOLS = [
       type: 'object',
       properties: {
         target: { type: 'string', description: 'Backup directory (default: <workspace>/.backups). Prefer another drive or a cloud-synced folder.' },
-        keep: { type: 'number', description: 'Snapshots to keep (default 10).' },
+        keep: { type: 'number', description: 'Snapshots to keep (default 10, minimum 1; 0 is clamped to 1 because the snapshot just written must be retained).' },
         workspace: WS_PROP,
       },
       additionalProperties: false,
     },
-    run: (a) => backupWorkspace(resolveDir(a.workspace), a.target, a.keep ? Number(a.keep) : DEFAULT_KEEP),
+    run: (a) => backupWorkspace(resolveDir(a.workspace), a.target, a.keep !== undefined ? Number(a.keep) : DEFAULT_KEEP),
   },
   {
     name: 'archivist_commit',

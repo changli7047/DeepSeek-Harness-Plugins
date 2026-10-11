@@ -5,13 +5,15 @@
 - **OpenCode v2**（`~/.config/opencode/plugins/`，配置目录热加载）
 - **DeepSeek Harness / dsh**（profile 配置层或 `--patch` 覆盖层）
 
-所有插件均为**纯文件型、零第三方依赖**，复制文件即可安装：`windows-tools` 依赖系统自带的 PowerShell 5.1；`archivist` 直接运行在宿主内置的 Node/TS 运行时上。
+所有插件均为**纯文件型**、无 npm/pip 依赖：`windows-tools` 依赖系统自带的 PowerShell 5.1；`archivist` 直接运行在宿主内置的 Node/TS 运行时上。
+
+**注意：「复制文件即可安装」只对 OpenCode 端成立。** dsh 端的插件是 ESM 源码、会在运行时导入宿主包（如 `@deepseek-ai/dsh-tools`），因此必须放进 dsh 源码仓库中**已铺好 `node_modules` 的那一层**——惯例位置是 `<dsh-repo>/scratch-plugin/src/`——再把 profile 或 `--patch` 覆盖层指向该副本。指向本仓库的克隆目录会以 `Cannot find module '@deepseek-ai/dsh-tools'` 失败。
 
 ## 插件目录
 
 | 插件 | 能力 | 适用端 |
 |---|---|---|
-| [windows-tools](windows-tools/README.md) | Windows 桌面观察与自动化：状态/元素快照、**后台窗口截图**、后台/前台点击与输入、剪贴板、窗口激活与启动、条件等待（12–13 个工具） | OpenCode v2 + dsh |
+| [windows-tools](windows-tools/README.md) | Windows 桌面观察与自动化：状态/元素快照、**后台窗口截图**、后台/前台点击与输入、剪贴板、窗口激活与启动、条件等待（dsh 13 个 / OpenCode 12 个工具） | OpenCode v2 + dsh |
 | [archivist](archivist/README.md) | 本地长期知识库：资料/对话编译成互链 markdown wiki（检索、校验、索引、日志、免 git 备份，**实测支持千万 token 级数据量**），含双端「对话蒸馏」钩子（13 工具 + 2 钩子） | OpenCode v2 + dsh |
 
 ## 给 AI Agent：如何从此仓库安装插件
@@ -25,6 +27,7 @@
 2. 打开目标插件目录下的 `README.md`，找到其中的 **「AI 安装」** 小节，严格按步骤执行。
 3. 执行该 README 中的 **「自检」** 命令，确认输出符合预期后，才算安装成功。
 4. 不要跳过平台检查：所有插件目前**仅支持 Windows 10/11**。
+5. **dsh 端特别注意**：插件文件必须放进 dsh 源码仓库里已铺好 `node_modules` 的那一层（惯例 `<dsh-repo>/scratch-plugin/src/`），profile 补丁或 `--patch` 的 `name:` 指向**该副本**。指向本仓库的克隆目录会以 `Cannot find module '@deepseek-ai/dsh-tools'` 失败——插件是 ESM 源码，裸导入按文件位置向上解析。
 
 ### For AI agents (English quick steps)
 

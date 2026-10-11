@@ -151,33 +151,35 @@ export default Plugin.define({
 
       editor.add({
         name: "screenshot",
-        description: "Capture a PNG screenshot (DPI-aware, physical pixels). Default captures the whole screen; `window` captures one window in the background (works when occluded; minimized windows are not supported); x/y/width/height select a region; scale (1-4) enlarges it. Returns the saved file path — read it with the read tool to view the image.",
+        description: "Capture a PNG screenshot (DPI-aware, physical pixels). Default captures the whole screen; `window` captures one window in the background (works when occluded; minimized windows are not supported); x/y/width/height select a region and must be given together; scale (1-4) enlarges it. An existing filePath is refused unless overwrite is true. Returns the saved file path — read it with the read tool to view the image.",
         input: {
           type: "object",
           properties: {
-            filePath: { type: "string", description: "Absolute path for the PNG; defaults to a timestamped temp file." },
+            filePath: { type: "string", description: "Absolute path for the PNG; must end with .png and must not already exist unless overwrite is true. Defaults to a fresh timestamped temp file." },
+            overwrite: { type: "boolean", description: "Allow replacing an existing file at filePath; defaults to false, in which case the call fails instead of overwriting." },
             window: { type: "string", description: "Window target: title substring, process name (e.g. Weixin), or PID; captures that window in the background." },
-            x: { type: "number", description: "Region left edge." },
-            y: { type: "number", description: "Region top edge." },
-            width: { type: "number", description: "Region width (requires x and y)." },
-            height: { type: "number", description: "Region height (requires x and y)." },
+            x: { type: "number", description: "Region left edge (requires y, width and height as well)." },
+            y: { type: "number", description: "Region top edge (requires x, width and height as well)." },
+            width: { type: "number", description: "Region width (requires x, y and height as well)." },
+            height: { type: "number", description: "Region height (requires x, y and width as well)." },
             scale: { type: "number", description: "Enlargement factor 1-4; defaults to 1." },
           },
           additionalProperties: false,
         },
         options: { namespace: "windows", codemode: true },
         execute: async (input) => {
-          const args = input as { filePath?: string; window?: string; x?: number; y?: number; width?: number; height?: number; scale?: number }
+          const args = input as { filePath?: string; overwrite?: boolean; window?: string; x?: number; y?: number; width?: number; height?: number; scale?: number }
           const path = args.filePath ?? defaultShotPath()
           const request: Record<string, unknown> = { cmd: "screenshot", path }
           if (args.window !== undefined) request.window = args.window
-          if (args.x !== undefined && args.y !== undefined && args.width !== undefined && args.height !== undefined) {
-            request.x = Math.round(args.x)
-            request.y = Math.round(args.y)
-            request.width = Math.round(args.width)
-            request.height = Math.round(args.height)
-          }
+          // Forward region arguments one by one: the helper rejects a partial set
+          // instead of silently capturing the whole screen.
+          if (args.x !== undefined) request.x = Math.round(args.x)
+          if (args.y !== undefined) request.y = Math.round(args.y)
+          if (args.width !== undefined) request.width = Math.round(args.width)
+          if (args.height !== undefined) request.height = Math.round(args.height)
           if (args.scale !== undefined) request.scale = args.scale
+          if (args.overwrite === true) request.overwrite = true
           const response = await callHost(request, 60000)
           const geometry = /^saved: (.+)\|width:(\d+)\|height:(\d+)\|scale:([0-9.]+)\|source:/.exec(response)
           if (geometry === null) throw new Error(`screenshot helper returned an unexpected result: ${response}`)
@@ -379,16 +381,16 @@ export default Plugin.define({
 
       editor.add({
         name: "wait_for",
-        description: "Wait until a desktop condition becomes true (fails with a timeout error otherwise): foreground (foreground window title contains value), window (any visible window title contains value), pixel (screen pixel at x,y changes), region (average pixel difference in x,y,width,height exceeds threshold, default 20 — works for web-style UI), settle (region or whole screen unchanged for stableFrames consecutive frames, default 3 — wait for rendering after any action).",
+        description: "Wait until a desktop condition becomes true (fails with a timeout error otherwise): foreground (foreground window title contains value), window (any visible window title contains value), pixel (screen pixel at x,y changes), region (average pixel difference in x,y,width,height exceeds threshold, default 20 — works for web-style UI), settle (region or whole screen unchanged for stableFrames consecutive frames, default 3 — wait for rendering after any action). The region conditions take x, y, width and height together or not at all.",
         input: {
           type: "object",
           properties: {
             kind: { type: "string", enum: ["foreground", "window", "pixel", "region", "settle"], description: "Condition to wait for." },
-            value: { type: "string", description: "Title substring for foreground/window." },
-            x: { type: "number", description: "Pixel x or region left edge." },
-            y: { type: "number", description: "Pixel y or region top edge." },
-            width: { type: "number", description: "Region width." },
-            height: { type: "number", description: "Region height." },
+            value: { type: "string", description: "Title substring for foreground/window: required and must not be empty for those kinds." },
+            x: { type: "number", description: "Pixel x or region left edge (all four region values must be given together)." },
+            y: { type: "number", description: "Pixel y or region top edge (all four region values must be given together)." },
+            width: { type: "number", description: "Region width; omit all four region values to watch the whole screen." },
+            height: { type: "number", description: "Region height; omit all four region values to watch the whole screen." },
             threshold: { type: "number", description: "Region difference threshold; default 20." },
             stableFrames: { type: "number", description: "Consecutive unchanged frames for settle; default 3." },
             timeoutSeconds: { type: "number", description: "Max wait in seconds; default 10, cap 60." },

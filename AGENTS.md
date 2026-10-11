@@ -8,6 +8,7 @@
 2. 读对应插件的 `README.md`，执行其 **「AI 安装」** 小节，逐条命令照做，不要自由发挥。
 3. 执行其 **「自检」** 命令并核对预期输出；未通过自检不得报告安装成功。
 4. 仅支持 Windows 10/11；宿主不存在时不要尝试为其它平台"适配"。
+5. **dsh 端的位置约束**：插件文件必须位于 dsh 源码仓库中已铺好 `node_modules` 的那一层（惯例 `<dsh-repo>/scratch-plugin/src/`），补丁里的 `name:` 指向该副本。dsh 插件是 ESM 源码、运行时会导入 `@deepseek-ai/dsh-tools`，裸导入按文件位置向上解析 —— 指向本仓库克隆目录会以 `Cannot find module` 失败。OpenCode 端无此约束。
 
 ## 修改本仓库时
 
@@ -18,7 +19,7 @@
   使用方需要重新复制/重新克隆才能拿到新 host。
 - `archivist/core/archivist.mjs` 是 archivist 插件的唯一逻辑源头；改动后运行
   `node archivist/build/build.mjs` 重新生成 `archivist/opencode/index.ts` 与 `archivist/dsh/archivist.ts`
-  （构建器自带断言：12 个工具注册，失败即中止）。
+  （构建器自带断言：13 个工具注册，失败即中止）。
 - 保持每个插件 README 的四节结构：功能清单 / AI 安装 / 自检 / 限制与卸载。
 - 修改行为后，必须同步更新受影响插件 README 的说明与自检预期。
 

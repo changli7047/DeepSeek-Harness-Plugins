@@ -29,21 +29,21 @@
 | `archivist_status` | `archivist.status` | 概览：页数、token 估算、源状态、最近日志 |
 | `archivist_sources` | `archivist.sources` | `raw/` 清单与摄入状态（new / changed / ingested，哈希跟踪） |
 | `archivist_search` | `archivist.search` | 检索（词法级）：标题+全文，CJK 二元组/整短语/紧凑变体/IDF |
-| `archivist_scan` | `archivist.scan` | **全量精确扫描**：计数 + 完整文件清单 + 覆盖声明（穷尽/统计类问题专用，不做 top-K 截断） |
+| `archivist_scan` | `archivist.scan` | **全量精确扫描**：精确计数 + 命中文件清单（≤60 个全列；超出时只列前 60 个并明示`清单截断`，计数与文件数仍准确）+ 覆盖声明（穷尽/统计类问题专用，不做 top-K 截断）；被跳过的文件（>2MB、扩展名不在白名单的非空文件）如实计入声明 |
 | `archivist_read` | `archivist.read` | 读页（标题宽容解析、支持批量） |
 | `archivist_write` | `archivist.write` | 校验并写页：frontmatter 补全、索引自动重建、源标记、可选日志 |
 | `archivist_index` | `archivist.index` | 确定性重建 `index.md`（根治目录漂移） |
 | `archivist_lint` | `archivist.lint` | 结构体检：断链/孤儿页/缺 frontmatter/重复标题/索引缺漏/高频未建页 |
 | `archivist_log` | `archivist.log` | 追加/读取时间线日志（`grep` 友好） |
-| `archivist_backup` | `archivist.backup` | 免 git 快照备份 + 轮转（建议 target 指向别的盘/云盘目录） |
-| `archivist_commit` | `archivist.commit` | 可选：`git add + commit`（无 git 不影响使用） |
+| `archivist_backup` | `archivist.backup` | 免 git 快照备份 + 轮转（建议 target 指向别的盘/云盘目录）；只轮转严格匹配快照命名的目录，同前缀的其它目录一律保留并在回执中列出 |
+| `archivist_commit` | `archivist.commit` | 可选：`git add + commit`（无 git 不影响使用）；只暂存/提交知识库目录内的改动，知识库嵌在别的仓库里时不会带上无关文件 |
 
 ## 引用纪律与纠错语义（v2）
 
 - **trust 分级**：页面默认 `medium`（有 raw 出处）或 `low`（模型派生、无出处）；`high` 保留给用户确认内容。检索会给低信任页标注`低信任`，`archivist_read`/`archivist.read` 返回状态横幅
-- **raw-first 蒸馏**：对话先落 `raw/conversations/` 原文，再编译成页（`sourceFile` 锚定出处）——蒸馏产物可回查、可审计
+- **raw-first 蒸馏**：对话先落 `raw/conversations/` 原文，再编译成页（`sourceFile` 锚定出处，**且必须是 `raw/` 下的文件**——越界会被拒绝，这样每份出处都可在 `archivist_sources` 里复查）——蒸馏产物可回查、可审计
 - **纠错永不覆盖历史**：`supersedes` 写替代页（旧页自动 `superseded`，检索降权并标注替代关系）；`retract` 撤回（检索排除）；`archivist_lint`/`archivist.lint` 校验替代链完整性
-- **穷尽类问题路由**：`archivist_scan`/`archivist.scan` 提供全量精确计数与完整文件清单（附覆盖声明，不做 top-K 截断）；检索检测到穷尽/计数意图时会提示改用 scan
+- **穷尽类问题路由**：`archivist_scan`/`archivist.scan` 提供全量精确计数与命中文件清单（≤60 个全列，超出时明示`清单截断`与未显示条数、计数与文件数仍准确；附覆盖声明：被跳过的文件数量与原因一并列出，未扫描部分绝不冒称"完整清单"）；检索检测到穷尽/计数意图时会提示改用 scan
 
 ## 对话蒸馏钩子（可选组件）
 
@@ -68,10 +68,10 @@
 | **1,060 万 token** | 4,752 | 33.4 MB | **160 ms**（p95 214ms） | 592 ms |
 
 - 线性扩展（约 0.14ms/文件）；`mtime+size` 内容缓存让重复查询进入内存档
-- 检索准确率：内置**分类评测台**（`bench/eval.mjs` + `bench/make-eval.mjs`，8 类断言）；实测：含中文真实库 **60/60**、含纠错场景演示库 **10/10**
+- 分类检索**回归集**（`bench/eval.mjs` + `bench/make-eval.mjs`，8 类断言）：期望值由 `make-eval.mjs` 用**同一套检索代码**从语料机械推导、并在生成时冻结 —— 它证明的是**检索行为无回归**，**不是**相对人工标注的准确率；实测：含中文真实库 **60/60**、含纠错场景演示库 **10/10**
 - token 估算口径：CJK ≈ 1 字/token；拉丁 ≈ 4 字符/token
 
-**边界说明（诚实声明）**：单次模型注意力仍受上下文窗口限制——"回忆 = 检索 + 重合成"。超过 ~1000 万 token 或高频查询场景，建议后续接入 ripgrep（OpenCode 自带 `~/.cache/opencode/bin/rg.exe`）或向量检索；当前版本为词法级检索，对同义改写的命中有限。
+**边界说明（诚实声明）**：单次模型注意力仍受上下文窗口限制——"回忆 = 检索 + 重合成"。超过 ~1000 万 token 或高频查询场景，建议后续接入 ripgrep（OpenCode 自带 `~/.cache/opencode/bin/rg.exe`）或向量检索；当前版本为词法级检索，对同义改写的命中有限。`raw/` 中**超过 2MB 的文件**与**扩展名不在 `.md/.txt/.json/.csv/.yaml/.yml` 白名单的非空文件**不参与检索与扫描——两者都会被如实计入 `archivist_search`/`archivist_scan` 的覆盖声明（数量 + 原因 + 文件名），不会被静默丢弃。**0 字节文件**（如 `archivist_init` 建库写入的 `raw/.gitkeep`）视为"已扫描、内容为空、零命中"：空文件不可能藏有匹配，所以它不是覆盖缺口，不计入跳过清单——这样覆盖声明只在真有内容被漏掉时出现，不会被常年噪音稀释。
 
 ---
 
@@ -100,7 +100,7 @@ Copy-Item "$REPO\archivist\opencode\archivist-distill.ts" "$dir\archivist-distil
 
 ### 方式 B：dsh
 
-> **重要**：dsh 插件文件**必须放进 dsh 源码仓库树内**（例如 `<dsh-repo>/scratch-plugin/src/`），否则 `@deepseek-ai/dsh-tools` 依赖无法解析、插件加载失败。
+> **重要**：dsh 插件文件**必须放进 `<dsh-repo>/scratch-plugin/` 之下**（惯例路径 `<dsh-repo>/scratch-plugin/src/`）。真正起作用的是**那一层的 `node_modules`**（`@deepseek-ai/dsh-tools` 符号链接）；dsh 插件是 ESM 源码、运行时按文件位置向上解析裸导入，所以放进仓库的其它目录同样解析不了、插件加载失败。
 
 ```powershell
 # $DSHREPO = dsh 源码仓库绝对路径
@@ -136,7 +136,7 @@ cd <本仓库>\archivist
 node selftest.mjs
 ```
 
-预期输出：**`63 passed, 0 failed`**（覆盖：初始化/幂等挂回、源状态追踪、中文写页、索引重建、中英检索、路径安全、lint、备份轮转、**trust 分级/替代/撤回**、**穷尽扫描**、符号短语分词、缓存失效等）。
+预期输出：**`89 passed, 0 failed`**（覆盖：初始化/幂等挂回、源状态追踪、中文写页、索引重建、中英检索、路径安全（含 `sourceFile`/`supersedes` 越界）、**被跳过文件的覆盖披露**、**0 字节占位符不稀释覆盖声明**、lint、**备份轮转只删快照目录**、**写入原子性（拒绝写入不留半成品页）**、**commit 不越界暂存**、**bench 空库非零退出**、**数值 0 不被当假值**、**trust 分级/替代/撤回**、**穷尽扫描**、符号短语分词、缓存失效等）。机器无 git 时会多一行 `SKIP commit scoping`（该用例自动跳过，其余仍须全绿）。
 
 没有 Node.js 时：安装后在会话中调用 `archivist.init` 建一个临时库，再调用 `archivist.status`；能返回 `workspace:` 行即安装成功。
 

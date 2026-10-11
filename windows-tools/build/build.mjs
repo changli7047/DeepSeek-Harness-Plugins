@@ -16,7 +16,15 @@ const template = readFileSync(join(root, 'build', 'plugin.template.ts'), 'utf8')
 const host = readFileSync(join(root, 'host', 'wt-host.ps1'), 'utf8').replace(/\r?\n/g, '\r\n')
 
 if (!template.includes('__PS_HOST__')) throw new Error('template misses the __PS_HOST__ placeholder')
-if (host.includes('`')) throw new Error('host script contains a backtick and cannot be embedded')
+
+// The host text is embedded in a String.raw template literal. String.raw only
+// disables escape processing: a backtick still ends the literal and "${" still
+// starts an interpolation, either of which would corrupt the generated file.
+for (const [snippet, description] of [['`', 'a backtick'], ['${', 'the "${" sequence']]) {
+  if (host.includes(snippet)) {
+    throw new Error(`host script contains ${description} and cannot be embedded in a String.raw template literal`)
+  }
+}
 
 // split/join performs no replacement-pattern interpretation ($&, $', ...)
 const out = template.split('__PS_HOST__').join(host)

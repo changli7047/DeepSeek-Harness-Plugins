@@ -5,15 +5,18 @@
 import {
   initWorkspace, attachWorkspace, listSources, writePage, readPages, searchWiki,
   lintWiki, appendLog, readLog, estimateTokens, statusWorkspace, backupWorkspace,
-  parsePage, rebuildIndex, scanCorpus, TOOLS,
+  commitWorkspace, parsePage, rebuildIndex, scanCorpus, TOOLS,
 } from './core/archivist.mjs'
 import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
+import { spawnSync } from 'node:child_process'
 import os from 'node:os'
 import path from 'node:path'
+import { fileURLToPath } from 'node:url'
 
 const ws = path.join(os.tmpdir(), 'archivist-smoke-' + Date.now())
+const cleanupPaths = [ws]
 process.env.ARCHIVIST_POINTER = path.join(os.tmpdir(), 'archivist-smoke-pointer.json')
-let pass = 0, fail = 0
+let pass = 0, fail = 0, skipped = 0
 const ok = (name, cond, extra = '') => {
   if (cond) { pass++; console.log('PASS ' + name) }
   else { fail++; console.log('FAIL ' + name + (extra ? ' :: ' + extra : '')) }
@@ -177,8 +180,159 @@ try {
   ok('token estimate positive', estimateTokens('中文abc') >= 2)
   ok('tools table complete', TOOLS.length === 13 && TOOLS.every((t) => t.name.startsWith('archivist_')), 'count=' + TOOLS.length)
 
-  console.log(`\n${pass} passed, ${fail} failed`)
+  // 13. coverage honesty: files skipped by scan/search must be disclosed (A1)
+  writeFileSync(path.join(ws, 'raw', 'big-skip.md'), 'x'.repeat(2 * 1024 * 1024 + 1000) + '\nzzbig\nzzbig\n')
+  writeFileSync(path.join(ws, 'raw', 'skip-probe.md'), '# skip probe\n\nzzbig once\n')
+  writeFileSync(path.join(ws, 'raw', 'page.html'), '<p>zzbig</p>\n')
+  const bigScan = scanCorpus(ws, 'zzbig', 'raw')
+  ok('scan: skipped >2MB file is disclosed', bigScan.includes('超过 2MB') && bigScan.includes('raw/big-skip.md'), bigScan)
+  ok('scan: skipped extension is disclosed', bigScan.includes('扩展名不在白名单') && bigScan.includes('raw/page.html'), bigScan)
+  ok('scan: never claims a complete list while files were skipped', !bigScan.includes('完整清单'), bigScan)
+  ok('scan: count stays exact over the files it did scan', /total occurrences: 1/.test(bigScan) && bigScan.includes('raw/skip-probe.md'), bigScan.split('\n')[0])
+  const bigSearch = searchWiki(ws, 'zzbig', 10, 'raw')
+  ok('search: skipped raw files are disclosed', bigSearch.includes('未纳入检索') && bigSearch.includes('raw/big-skip.md') && bigSearch.includes('raw/page.html'), bigSearch)
+
+  // 13b. a 0-byte file is scanned-but-empty (not a gap); a non-empty filtered file still is
+  const gapWs = path.join(os.tmpdir(), 'archivist-smoke-gap-' + Date.now())
+  cleanupPaths.push(gapWs)
+  initWorkspace(gapWs)                                          // raw/.gitkeep is 0 bytes
+  writeFileSync(path.join(gapWs, 'raw', 'tiny.md'), '# tiny\nzzgap\n')
+  writeFileSync(path.join(gapWs, 'raw', 'empty.png'), '')        // 0 bytes, extension not whitelisted
+  const gapClean = scanCorpus(gapWs, 'zzgap', 'raw')
+  ok('scan: 0-byte placeholder does not dilute the coverage statement',
+    gapClean.includes('完整清单') && !gapClean.includes('扩展名不在白名单'), gapClean)
+  ok('scan: 0-byte files count as scanned (empty), not as skips',
+    /matched in 1 of 3 scanned file\(s\)/.test(gapClean) && !gapClean.includes('skipped'), gapClean.split('\n')[0])
+  writeFileSync(path.join(gapWs, 'raw', 'notes.html'), '<p>zzgap</p>\n')   // non-empty, extension not whitelisted
+  const gapDirty = scanCorpus(gapWs, 'zzgap', 'raw')
+  ok('scan: non-empty filtered file is still disclosed as a coverage gap',
+    gapDirty.includes('扩展名不在白名单') && gapDirty.includes('raw/notes.html') && !gapDirty.includes('完整清单'), gapDirty)
+
+  // 14. backup rotation must never delete a look-alike user directory (A2)
+  const bkTarget = path.join(os.tmpdir(), 'archivist-smoke-backups-' + Date.now())
+  cleanupPaths.push(bkTarget)
+  mkdirSync(path.join(bkTarget, 'archivist-1-userdata'), { recursive: true })
+  writeFileSync(path.join(bkTarget, 'archivist-1-userdata', 'keep.txt'), 'user data\n')
+  mkdirSync(path.join(bkTarget, 'archivist-20200101-000000000'), { recursive: true })
+  const bkOut = backupWorkspace(ws, bkTarget, 1)
+  ok('backup: look-alike user dir survives rotation', existsSync(path.join(bkTarget, 'archivist-1-userdata', 'keep.txt')), bkOut)
+  ok('backup: unrecognized entry is reported, not deleted', bkOut.includes('archivist-1-userdata') && /skipped 1 unrecognized/.test(bkOut), bkOut)
+  ok('backup: strict-format old snapshot is still rotated', !existsSync(path.join(bkTarget, 'archivist-20200101-000000000')), bkOut)
+
+  // 15. path guards for sourceFile / supersedes (A4)
+  const outsideSecret = path.join(os.tmpdir(), 'archivist-smoke-outside-' + Date.now() + '.txt')
+  cleanupPaths.push(outsideSecret)
+  writeFileSync(outsideSecret, 'secret outside the workspace\n')
+  for (const [desc, args, pageAbs] of [
+    ['sourceFile escaping the workspace is blocked',
+      { path: 'sources/escape.md', body: '# x\n', sourceFile: '../' + path.basename(outsideSecret) },
+      path.join(ws, 'wiki', 'sources', 'escape.md')],
+    ['sourceFile outside raw/ is blocked',
+      { path: 'sources/invisible.md', body: '# x\n', sourceFile: 'AGENTS.md' },
+      path.join(ws, 'wiki', 'sources', 'invisible.md')],
+    ['supersedes escaping wiki/ is blocked',
+      { path: 'concepts/escape2.md', body: '# x\n', supersedes: '../../outside.md' },
+      path.join(ws, 'wiki', 'concepts', 'escape2.md')],
+  ]) {
+    let t = false
+    try { writePage(ws, args) } catch { t = true }
+    ok(desc, t && !existsSync(pageAbs), 'threw=' + t)
+  }
+
+  // 16. a rejected write must not leave a half-written page behind (A5)
+  writePage(ws, { path: 'sources/atomic.md', title: 'Atomic', body: '# Atomic\n\noriginal\n' })
+  const atomicAbs = path.join(ws, 'wiki', 'sources', 'atomic.md')
+  const atomicBefore = readFileSync(atomicAbs, 'utf8')
+  const indexBefore = readFileSync(path.join(ws, 'wiki', 'index.md'), 'utf8')
+  for (const [desc, args, pageAbs] of [
+    ['rejected write (missing sourceFile) leaves no page',
+      { path: 'sources/atomic-a.md', body: '# a\n', sourceFile: 'raw/never-existed.md' },
+      path.join(ws, 'wiki', 'sources', 'atomic-a.md')],
+    ['rejected write (missing supersedes target) leaves no page',
+      { path: 'concepts/atomic-b.md', body: '# b\n', supersedes: 'concepts/ghost.md' },
+      path.join(ws, 'wiki', 'concepts', 'atomic-b.md')],
+  ]) {
+    let t = false
+    try { writePage(ws, args) } catch { t = true }
+    ok(desc, t && !existsSync(pageAbs), 'threw=' + t)
+  }
+  let rejected = false
+  try { writePage(ws, { path: 'sources/atomic.md', body: '# Atomic\n\nREWRITTEN\n', supersedes: 'concepts/ghost.md' }) } catch { rejected = true }
+  ok('rejected write leaves the existing page untouched', rejected && readFileSync(atomicAbs, 'utf8') === atomicBefore)
+  ok('rejected write leaves index.md untouched', readFileSync(path.join(ws, 'wiki', 'index.md'), 'utf8') === indexBefore)
+
+  // 17. archivist_commit must not stage files outside the workspace (A3)
+  const gitProbe = spawnSync('git', ['--version'], { encoding: 'utf8' })
+  if (gitProbe.status === 0) {
+    const outer = path.join(os.tmpdir(), 'archivist-smoke-outer-' + Date.now())
+    cleanupPaths.push(outer)
+    mkdirSync(outer, { recursive: true })
+    const runGit = (...args) => spawnSync('git', args, { cwd: outer, encoding: 'utf8' })
+    runGit('init')
+    writeFileSync(path.join(outer, 'UNRELATED-USER-FILE.txt'), 'v1\n')
+    runGit('add', '-A')
+    runGit('-c', 'user.name=selftest', '-c', 'user.email=selftest@example.invalid', 'commit', '-m', 'init')
+    const innerWs = path.join(outer, 'wiki-ws')
+    initWorkspace(innerWs)
+    writeFileSync(path.join(outer, 'UNRELATED-USER-FILE.txt'), 'v2 unrelated user edit\n')
+    let commitOut = ''
+    try { commitOut = commitWorkspace(innerWs, 'selftest: scoped commit') } catch (e) { commitOut = 'THREW: ' + e.message }
+    const headFiles = (runGit('show', '--name-only', '--format=', 'HEAD').stdout || '')
+      .split('\n').map((s) => s.trim()).filter(Boolean)
+    ok('commit: workspace files are committed', headFiles.some((f) => f.startsWith('wiki-ws/')), commitOut + ' | ' + headFiles.join(','))
+    ok('commit: unrelated file outside the workspace is not committed', !headFiles.includes('UNRELATED-USER-FILE.txt'), headFiles.join(','))
+    // A file the user already staged in the parent repo must not ride along either.
+    writeFileSync(path.join(outer, 'STAGED-USER-FILE.txt'), 'user staged work\n')
+    runGit('add', 'STAGED-USER-FILE.txt')
+    appendLog(innerWs, 'selftest | scoped commit probe')
+    let commitOut2 = ''
+    try { commitOut2 = commitWorkspace(innerWs, 'selftest: scoped commit 2') } catch (e) { commitOut2 = 'THREW: ' + e.message }
+    const headFiles2 = (runGit('show', '--name-only', '--format=', 'HEAD').stdout || '')
+      .split('\n').map((s) => s.trim()).filter(Boolean)
+    ok('commit: workspace change lands while a pre-staged parent file stays out',
+      commitOut2.includes('committed') && headFiles2.some((f) => f.startsWith('wiki-ws/')) && !headFiles2.includes('STAGED-USER-FILE.txt'),
+      commitOut2 + ' | ' + headFiles2.join(','))
+    ok('commit: pre-staged parent file is left staged, not committed',
+      (runGit('diff', '--cached', '--name-only').stdout || '').includes('STAGED-USER-FILE.txt'), commitOut2)
+  } else {
+    skipped++
+    console.log('SKIP commit scoping (git is not available on this machine)')
+  }
+
+  // 18. bench must fail loudly on a missing or empty library (A6)
+  const benchScript = fileURLToPath(new URL('./bench/bench-queries.mjs', import.meta.url))
+  const benchRun = (dir) => {
+    const report = path.join(os.tmpdir(), 'archivist-smoke-bench-' + Date.now() + '.md')
+    cleanupPaths.push(report)
+    const r = spawnSync(process.execPath, [benchScript, dir, report], { encoding: 'utf8' })
+    return { r, report }
+  }
+  const benchMissing = benchRun(path.join(os.tmpdir(), 'archivist-smoke-nolib-' + Date.now()))
+  ok('bench: missing library exits non-zero and writes no report',
+    benchMissing.r.status !== 0 && benchMissing.r.status !== null && !existsSync(benchMissing.report), 'status=' + benchMissing.r.status)
+  const emptyLib = path.join(os.tmpdir(), 'archivist-smoke-emptylib-' + Date.now())
+  cleanupPaths.push(emptyLib)
+  mkdirSync(path.join(emptyLib, 'raw'), { recursive: true })
+  const benchEmpty = benchRun(emptyLib)
+  ok('bench: empty library exits non-zero and writes no report',
+    benchEmpty.r.status !== 0 && benchEmpty.r.status !== null && !existsSync(benchEmpty.report), 'status=' + benchEmpty.r.status)
+
+  // 19. numeric option 0 must not be treated as a missing option (A7)
+  const zeroTarget = path.join(os.tmpdir(), 'archivist-smoke-zerokeep-' + Date.now())
+  cleanupPaths.push(zeroTarget)
+  for (const n of ['20200101-000000001', '20200101-000000002', '20200101-000000003']) {
+    mkdirSync(path.join(zeroTarget, 'archivist-' + n), { recursive: true })
+  }
+  const keepZero = TOOLS.find((t) => t.name === 'archivist_backup').run({ workspace: ws, target: zeroTarget, keep: 0 })
+  const keptSnapshots = readdirSync(zeroTarget).filter((e) => /^archivist-\d{8}-\d{9,}$/.test(e))
+  ok('backup keep:0 is honoured (not silently the default 10)', keptSnapshots.length === 1, keepZero + ' | kept=' + keptSnapshots.length)
+  const logAbs = path.join(ws, 'wiki', 'log.md')
+  const logBeforeZero = readFileSync(logAbs, 'utf8')
+  const readZero = String(TOOLS.find((t) => t.name === 'archivist_log').run({ workspace: ws, read: 0 }))
+  ok('log read:0 reads instead of appending', readFileSync(logAbs, 'utf8') === logBeforeZero && !readZero.startsWith('logged:'), readZero)
+
+  console.log(`\n${pass} passed, ${fail} failed${skipped ? `, ${skipped} skipped` : ''}`)
   process.exitCode = fail ? 1 : 0
 } finally {
-  try { rmSync(ws, { recursive: true, force: true }) } catch { }
+  for (const p of cleanupPaths) { try { rmSync(p, { recursive: true, force: true }) } catch { } }
 }

@@ -5,7 +5,7 @@
  * a UTF-8 markdown report with per-query latencies and top hits.
  */
 import { searchWiki, listSources } from '../core/archivist.mjs'
-import { writeFileSync, statSync } from 'node:fs'
+import { existsSync, writeFileSync, statSync } from 'node:fs'
 import { readdirSync } from 'node:fs'
 import path from 'node:path'
 
@@ -41,7 +41,15 @@ const walkBytes = (root) => {
   return { files, bytes }
 }
 
-const raw = walkBytes(path.join(dir, 'raw'))
+// A missing or empty library must fail loudly: a silent all-"no match" report with
+// exit 0 reads like a valid measurement and hides the fact that nothing was measured.
+const rawDir = path.join(dir, 'raw')
+const raw = walkBytes(rawDir)
+if (!existsSync(rawDir) || raw.files === 0) {
+  console.error(`error: ${rawDir} is missing or contains no .md/.txt files — nothing to benchmark.`)
+  console.error('       Pass an existing archivist workspace (archivist_init creates raw/ and wiki/).')
+  process.exit(2)
+}
 let t0 = performance.now()
 const sourceCount = listSources(dir).length
 const msSources = performance.now() - t0

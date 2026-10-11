@@ -1,10 +1,14 @@
 # windows-tools 的 DeepSeek Harness (dsh) 覆盖层模板。
 #
 # 用法：
-#   1. 将下方 <> 占位符替换为本仓库中 dsh/windows-tools.ts 的【绝对路径】；
-#   2. 启动时传入覆盖层：  dsh web --patch <本文件路径>
+#   1. 先把 dsh/windows-tools.ts 复制进 dsh 源码仓库中【已铺好 node_modules 的那一层】
+#      （惯例 <dsh-repo>/scratch-plugin/src/windows-tools.ts）：插件是 ESM 源码，
+#      运行时按文件位置向上解析 @deepseek-ai/dsh-tools 等裸导入；
+#      直接指向本仓库克隆目录会以 Cannot find module '@deepseek-ai/dsh-tools' 失败。
+#   2. 将下方 <> 占位符替换为该【副本】的绝对路径（不是本仓库里的那个文件）；
+#   3. 启动时传入覆盖层：  dsh web --patch <本文件路径>
 #      或把 insert 行搬进目标 profile 的 cordis.patch.yml 里常驻加载；
-#   3. 重启服务后，启动日志不得出现 "did not activate"。
+#   4. 重启服务后，启动日志不得出现 "did not activate" 或 "failed to import"。
 - insert:
     - id: windows-tools
-      name: '<ABSOLUTE_PATH_TO_REPO>/windows-tools/dsh/windows-tools.ts'
+      name: '<ABSOLUTE_PATH_TO_PLUGIN_FILE>'
