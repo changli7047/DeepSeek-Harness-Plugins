@@ -2,7 +2,6 @@
 
 给 AI Agent 的**本地长期知识库**插件：把对话、文档与资料增量编译成互相链接的 markdown wiki，跨会话、跨宿主检索与复用。**纯本地、零密钥、零网络、零第三方依赖**。
 
-- 方法论来源：Andrej Karpathy 的 [LLM Wiki 模式](https://gist.github.com/karpathy/442a6bf555914893e9891c11519de94f)——不用 RAG 每次重检索，而是让 LLM **一次编译、持续维护**一份持久的 wiki（复利资产）。
 - 形态：**OpenCode v2 插件**（工具命名空间 `archivist.*`）+ **DeepSeek Harness (dsh) 插件**（工具 `archivist_*`），外加可选的**对话蒸馏钩子**（双端）。
 - 与 `windows-tools` 不同：本插件不依赖 PowerShell，直接运行在宿主内置的 Node/TS 运行时上。
 
