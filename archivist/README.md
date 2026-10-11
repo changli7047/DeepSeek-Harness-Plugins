@@ -136,7 +136,7 @@ cd <本仓库>\archivist
 node selftest.mjs
 ```
 
-预期输出：**`63 passed, 0 failed`**（覆盖：初始化/幂等挂回、源状态追踪、中文写页、索引重建、中英检索、路径安全、lint、备份轮转、**trust 分级/替代/撤回**、**穷尽扫描**、符号短语分词、缓存失效等）。完整测试矩阵、分类评测台用法与最新全量结果见 **[TESTING.md](TESTING.md)**。
+预期输出：**`63 passed, 0 failed`**（覆盖：初始化/幂等挂回、源状态追踪、中文写页、索引重建、中英检索、路径安全、lint、备份轮转、**trust 分级/替代/撤回**、**穷尽扫描**、符号短语分词、缓存失效等）。
 
 没有 Node.js 时：安装后在会话中调用 `archivist.init` 建一个临时库，再调用 `archivist.status`；能返回 `workspace:` 行即安装成功。
 
@@ -166,7 +166,6 @@ node selftest.mjs
   node bench/eval-demo-setup.mjs <临时目录>                     # 生成含替代/撤回的演示库（验证 correction 类）
   ```
   类别：lookup / phrase / needle / multihop / aggregation / correction / mixed / unanswerable；阈值可用 `EVAL_MIN_TOP1`、`EVAL_MIN_OVERALL` 调整
-- 测试矩阵与最新全量结果：[TESTING.md](TESTING.md)
 
 ## 来源与致谢
 
