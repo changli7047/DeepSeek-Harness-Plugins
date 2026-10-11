@@ -1,10 +1,10 @@
 /**
- * Large-library query benchmark for the llm-wiki search path.
+ * Large-library query benchmark for the archivist search path.
  * Usage: node bench-queries.mjs <workspaceDir> <reportFile>
  * Runs a fixed query battery (CJK / English / mixed) at scope=raw and writes
  * a UTF-8 markdown report with per-query latencies and top hits.
  */
-import { searchWiki, listSources } from '../core/llm-wiki.mjs'
+import { searchWiki, listSources } from '../core/archivist.mjs'
 import { writeFileSync, statSync } from 'node:fs'
 import { readdirSync } from 'node:fs'
 import path from 'node:path'
@@ -90,7 +90,7 @@ md += `- 原始文件: **${stats.files} 个 / ${stats.mb} MB**（估算 ≈ ${(s
 md += `- 查询: ${stats.queries} 条 × ${stats.rounds} 轮（scope=raw，每次全库扫描）\n`
 md += `- 热身轮后延迟: **avg ${stats.warmAvgMs} ms | p50 ${stats.warmP50Ms} ms | p95 ${stats.warmP95Ms} ms | max ${stats.warmMaxMs} ms**\n`
 md += `- 含冷启动: avg ${stats.allAvgMs} ms\n`
-md += `- wiki_sources 全量哈希扫描: ${stats.msSources} ms\n\n`
+md += `- archivist_sources 全量哈希扫描: ${stats.msSources} ms\n\n`
 md += `| # | 查询 | best ms | Top 命中 |\n|---|---|---|---|\n`
 rows.forEach((r, i) => {
   md += `| ${i + 1} | ${r.q} | ${r.best.toFixed(1)} | ${r.top.map((t) => t.replace(/\|/g, '/')).join('<br>')} |\n`

@@ -16,6 +16,9 @@
   （构建器自带断言：13 个工具注册、1 个 apply 导出，失败即中止）。
 - `windows-tools/opencode/index.ts` 直接引用同目录 `wt-host.ps1`；发布更新后
   使用方需要重新复制/重新克隆才能拿到新 host。
+- `archivist/core/archivist.mjs` 是 archivist 插件的唯一逻辑源头；改动后运行
+  `node archivist/build/build.mjs` 重新生成 `archivist/opencode/index.ts` 与 `archivist/dsh/archivist.ts`
+  （构建器自带断言：12 个工具注册，失败即中止）。
 - 保持每个插件 README 的四节结构：功能清单 / AI 安装 / 自检 / 限制与卸载。
 - 修改行为后，必须同步更新受影响插件 README 的说明与自检预期。
 

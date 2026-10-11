@@ -1,7 +1,7 @@
-# llm-wiki 的 DeepSeek Harness (dsh) 覆盖层模板。
+# archivist 的 DeepSeek Harness (dsh) 覆盖层模板。
 #
 # 用法：
-#   1. 先把 dsh/llm-wiki.ts 与 dsh/llm-wiki-distill.ts 复制进 dsh 源码仓库树内
+#   1. 先把 dsh/archivist.ts 与 dsh/archivist-distill.ts 复制进 dsh 源码仓库树内
 #      （例如 <DSH_REPO>/scratch-plugin/src/）——文件必须位于仓库树内才能解析
 #      @deepseek-ai/dsh-tools 依赖；
 #   2. 把下方 <ABSOLUTE_DASH_...> 占位符替换为复制后的绝对路径；
@@ -9,7 +9,7 @@
 #      或把 insert 行搬进目标 profile 的 cordis.patch.yml 里常驻加载；
 #   4. 重启服务后，启动日志不得出现 "failed to import" / "did not activate"。
 - insert:
-    - id: llm-wiki
-      name: '<ABSOLUTE_PATH_TO_DSH_REPO>/scratch-plugin/src/llm-wiki.ts'
-    - id: llm-wiki-distill
-      name: '<ABSOLUTE_PATH_TO_DSH_REPO>/scratch-plugin/src/llm-wiki-distill.ts'
+    - id: archivist
+      name: '<ABSOLUTE_PATH_TO_DSH_REPO>/scratch-plugin/src/archivist.ts'
+    - id: archivist-distill
+      name: '<ABSOLUTE_PATH_TO_DSH_REPO>/scratch-plugin/src/archivist-distill.ts'

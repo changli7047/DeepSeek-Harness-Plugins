@@ -1,11 +1,11 @@
 /**
- * llm-wiki distill hook for OpenCode v2 (local plugin).
+ * archivist distill hook for OpenCode v2 (local plugin).
  *
  * Injects advisory system notes that steer durable conversation knowledge into
- * the llm-wiki knowledge base:
+ * the archivist knowledge base:
  * - first run after install: asks the user once whether previous conversations
- *   should be distilled into llm-wiki (recorded in the state file; asked once);
- * - every `LLM_WIKI_DISTILL_NUDGE` agent-loop requests per session (default 12,
+ *   should be distilled into archivist (recorded in the state file; asked once);
+ * - every `ARCHIVIST_DISTILL_NUDGE` agent-loop requests per session (default 12,
  *   0 disables): a light reminder to file important decisions via the wiki.*
  *   tools.
  *
@@ -14,27 +14,27 @@
  * affect only the outgoing request, never persisted history.
  *
  * Env overrides:
- *   LLM_WIKI_DISTILL_STATE  state file (default ~/.config/opencode/llm-wiki-distill.json)
- *   LLM_WIKI_DISTILL_NUDGE  nudge interval in requests (default 12; 0 disables)
+ *   ARCHIVIST_DISTILL_STATE  state file (default ~/.config/opencode/archivist-distill.json)
+ *   ARCHIVIST_DISTILL_NUDGE  nudge interval in requests (default 12; 0 disables)
  */
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs"
 import { homedir } from "node:os"
 import { dirname, join } from "node:path"
 import { Plugin } from "@opencode/plugin"
 
-const STATE_FILE = process.env.LLM_WIKI_DISTILL_STATE ?? join(homedir(), ".config", "opencode", "llm-wiki-distill.json")
+const STATE_FILE = process.env.ARCHIVIST_DISTILL_STATE ?? join(homedir(), ".config", "opencode", "archivist-distill.json")
 
 const FIRST_RUN_TEXT = [
-  "llm-wiki 蒸馏钩子首次运行：用户刚刚把 llm-wiki 本地知识库接入了本 harness。",
-  "请先用一句话询问用户：「要不要把你之前和我的对话内容蒸馏进 llm-wiki？」",
+  "archivist 蒸馏钩子首次运行：用户刚刚把 archivist 本地知识库接入了本 harness。",
+  "请先用一句话询问用户：「要不要把你之前和我的对话内容蒸馏进 archivist？」",
   "说明要点：只提炼关键决策、结论与方法，不全量搬运聊天记录；可让用户指定时间范围或会话。",
-  "用户同意后再执行（逐段提炼成 wiki 页面，用 wiki.write / wiki.log 写入，参考工作区 AGENTS.md 的 schema）。",
+  "用户同意后再执行（逐段提炼成 wiki 页面，用 archivist.write / archivist.log 写入，参考工作区 AGENTS.md 的 schema）。",
   "用户说不用就跳过，不要再问。问完后继续当前正常的任务。",
 ].join("\n")
 
 const NUDGE_TEXT = [
-  "llm-wiki 提醒：若刚才的对话产生了值得长期保留的内容（决策、结论、方法、重要事实），",
-  "请用 llm-wiki 工具沉淀（wiki.write 写页 / wiki.log 记一条）。",
+  "archivist 提醒：若刚才的对话产生了值得长期保留的内容（决策、结论、方法、重要事实），",
+  "请用 archivist 工具沉淀（archivist.write 写页 / archivist.log 记一条）。",
   "没有值得沉淀的请忽略本提醒——不要为填而填，也不要因此打断用户。",
 ].join("")
 
@@ -51,12 +51,12 @@ const writeState = (state: Record<string, unknown>): void => {
 }
 
 export default Plugin.define({
-  id: "llm-wiki-distill",
+  id: "archivist-distill",
   async setup(ctx) {
-    const raw = process.env.LLM_WIKI_DISTILL_NUDGE
+    const raw = process.env.ARCHIVIST_DISTILL_NUDGE
     const nudgeEvery = raw === undefined ? 12 : Number(raw)
     if (!Number.isInteger(nudgeEvery) || nudgeEvery < 0) {
-      throw new Error(`llm-wiki-distill: LLM_WIKI_DISTILL_NUDGE must be an integer >= 0, got ${String(raw)}`)
+      throw new Error(`archivist-distill: ARCHIVIST_DISTILL_NUDGE must be an integer >= 0, got ${String(raw)}`)
     }
 
     const perSession = new Map<string, number>()

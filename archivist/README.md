@@ -1,9 +1,9 @@
-# llm-wiki
+# archivist
 
 给 AI Agent 的**本地长期知识库**插件：把对话、文档与资料增量编译成互相链接的 markdown wiki，跨会话、跨宿主检索与复用。**纯本地、零密钥、零网络、零第三方依赖**。
 
-- 方法论来源：Andrej Karpathy 的 [llm-wiki 模式](https://gist.github.com/karpathy/442a6bf555914893e9891c11519de94f)——不用 RAG 每次重检索，而是让 LLM **一次编译、持续维护**一份持久的 wiki（复利资产）。
-- 形态：**OpenCode v2 插件**（工具命名空间 `wiki.*`）+ **DeepSeek Harness (dsh) 插件**（工具 `wiki_*`），外加可选的**对话蒸馏钩子**（双端）。
+- 方法论来源：Andrej Karpathy 的 [LLM Wiki 模式](https://gist.github.com/karpathy/442a6bf555914893e9891c11519de94f)——不用 RAG 每次重检索，而是让 LLM **一次编译、持续维护**一份持久的 wiki（复利资产）。
+- 形态：**OpenCode v2 插件**（工具命名空间 `archivist.*`）+ **DeepSeek Harness (dsh) 插件**（工具 `archivist_*`），外加可选的**对话蒸馏钩子**（双端）。
 - 与 `windows-tools` 不同：本插件不依赖 PowerShell，直接运行在宿主内置的 Node/TS 运行时上。
 
 ---
@@ -16,36 +16,36 @@
 |---|---|
 | 资料编译 | 把文档/笔记/网页剪藏/PDF 转出的 md 丢进 `raw/`，按 schema 编译成 `sources/entities/concepts/syntheses` 四类互链页面 |
 | 对话蒸馏 | 可选钩子：安装后首次会话 AI 会询问"要不要把之前的对话蒸馏进 wiki"；之后周期提醒，把决策/结论/方法沉淀为页面 |
-| 跨宿主复用 | 同一个工作区（如 `D:\llm-wiki`），OpenCode 与 dsh 都能读写 |
-| 备份与版本 | 内置**免 git 快照备份**（时间戳目录 + manifest + 轮转）；有 git 时可选 `wiki_commit` |
-| 可检索的规模 | `wiki_search` 支持 `scope: wiki / raw / all`，CJK 二元组 + 短语 + IDF 稀有度加权 |
+| 跨宿主复用 | 同一个工作区（如 `D:\archivist`），OpenCode 与 dsh 都能读写 |
+| 备份与版本 | 内置**免 git 快照备份**（时间戳目录 + manifest + 轮转）；有 git 时可选 `archivist_commit` |
+| 可检索的规模 | `archivist_search` 支持 `scope: wiki / raw / all`，CJK 二元组 + 短语 + IDF 稀有度加权 |
 
 ## 工具清单（12 个）
 
 | dsh 工具 | OpenCode 工具 | 作用 |
 |---|---|---|
-| `wiki_init` | `wiki.init` | 显式路径建库并注册指针（重装系统不丢：挂回即可） |
-| `wiki_attach` | `wiki.attach` | 挂回已有库（换机/换目录） |
-| `wiki_status` | `wiki.status` | 概览：页数、token 估算、源状态、最近日志 |
-| `wiki_sources` | `wiki.sources` | `raw/` 清单与摄入状态（new / changed / ingested，哈希跟踪） |
-| `wiki_search` | `wiki.search` | 检索（词法级）：标题+全文，CJK 二元组/整短语/紧凑变体/IDF |
-| `wiki_read` | `wiki.read` | 读页（标题宽容解析、支持批量） |
-| `wiki_write` | `wiki.write` | 校验并写页：frontmatter 补全、索引自动重建、源标记、可选日志 |
-| `wiki_index` | `wiki.index` | 确定性重建 `index.md`（根治目录漂移） |
-| `wiki_lint` | `wiki.lint` | 结构体检：断链/孤儿页/缺 frontmatter/重复标题/索引缺漏/高频未建页 |
-| `wiki_log` | `wiki.log` | 追加/读取时间线日志（`grep` 友好） |
-| `wiki_backup` | `wiki.backup` | 免 git 快照备份 + 轮转（建议 target 指向别的盘/云盘目录） |
-| `wiki_commit` | `wiki.commit` | 可选：`git add + commit`（无 git 不影响使用） |
+| `archivist_init` | `archivist.init` | 显式路径建库并注册指针（重装系统不丢：挂回即可） |
+| `archivist_attach` | `archivist.attach` | 挂回已有库（换机/换目录） |
+| `archivist_status` | `archivist.status` | 概览：页数、token 估算、源状态、最近日志 |
+| `archivist_sources` | `archivist.sources` | `raw/` 清单与摄入状态（new / changed / ingested，哈希跟踪） |
+| `archivist_search` | `archivist.search` | 检索（词法级）：标题+全文，CJK 二元组/整短语/紧凑变体/IDF |
+| `archivist_read` | `archivist.read` | 读页（标题宽容解析、支持批量） |
+| `archivist_write` | `archivist.write` | 校验并写页：frontmatter 补全、索引自动重建、源标记、可选日志 |
+| `archivist_index` | `archivist.index` | 确定性重建 `index.md`（根治目录漂移） |
+| `archivist_lint` | `archivist.lint` | 结构体检：断链/孤儿页/缺 frontmatter/重复标题/索引缺漏/高频未建页 |
+| `archivist_log` | `archivist.log` | 追加/读取时间线日志（`grep` 友好） |
+| `archivist_backup` | `archivist.backup` | 免 git 快照备份 + 轮转（建议 target 指向别的盘/云盘目录） |
+| `archivist_commit` | `archivist.commit` | 可选：`git add + commit`（无 git 不影响使用） |
 
 ## 对话蒸馏钩子（可选组件）
 
 | 宿主 | 文件 | 挂点 |
 |---|---|---|
-| dsh | `dsh/llm-wiki-distill.ts` | `agent/pre-step` 瀑布，向本步注入 notice 消息 |
-| OpenCode | `opencode/llm-wiki-distill.ts` | `ctx.session.hook("context")`，在派发前追加 system 文本 |
+| dsh | `dsh/archivist-distill.ts` | `agent/pre-step` 瀑布，向本步注入 notice 消息 |
+| OpenCode | `opencode/archivist-distill.ts` | `ctx.session.hook("context")`，在派发前追加 system 文本 |
 
-行为：**首次安装检测**——装好后第一次真实会话，AI 会被要求询问「要不要把之前的对话蒸馏进 llm-wiki？」（只问一次，写入状态文件）；此后每 12 个模型请求轻提醒一次（advisory，不阻断；写入由 Agent 决定，避免灌水）。
-开关：环境变量 `LLM_WIKI_DISTILL_STATE`（状态文件路径）/ `LLM_WIKI_DISTILL_NUDGE`（间隔，0=关闭）。
+行为：**首次安装检测**——装好后第一次真实会话，AI 会被要求询问「要不要把之前的对话蒸馏进 archivist？」（只问一次，写入状态文件）；此后每 12 个模型请求轻提醒一次（advisory，不阻断；写入由 Agent 决定，避免灌水）。
+开关：环境变量 `ARCHIVIST_DISTILL_STATE`（状态文件路径）/ `ARCHIVIST_DISTILL_NUDGE`（间隔，0=关闭）。
 
 ---
 
@@ -80,15 +80,15 @@
 $REPO = "$env:USERPROFILE\DeepSeek-Harness-Plugins"
 
 $dir = "$env:USERPROFILE\.config\opencode\plugins"
-New-Item -ItemType Directory -Force -Path "$dir\llm-wiki" | Out-Null
-Copy-Item "$REPO\llm-wiki\opencode\index.ts" "$dir\llm-wiki\index.ts" -Force
+New-Item -ItemType Directory -Force -Path "$dir\archivist" | Out-Null
+Copy-Item "$REPO\archivist\opencode\index.ts" "$dir\archivist\index.ts" -Force
 
 # 可选：对话蒸馏钩子（独立文件插件）
-Copy-Item "$REPO\llm-wiki\opencode\llm-wiki-distill.ts" "$dir\llm-wiki-distill.ts" -Force
+Copy-Item "$REPO\archivist\opencode\archivist-distill.ts" "$dir\archivist-distill.ts" -Force
 ```
 
 **生效方式**：OpenCode 监听配置目录并热加载，无需重启。
-**验证**：会话工具目录出现 `tools.wiki.*`（12 个）。
+**验证**：会话工具目录出现 `tools.archivist.*`（12 个）。
 
 ### 方式 B：dsh
 
@@ -99,22 +99,22 @@ Copy-Item "$REPO\llm-wiki\opencode\llm-wiki-distill.ts" "$dir\llm-wiki-distill.t
 $DSHREPO = "C:\path\to\deepseek-harness"
 
 New-Item -ItemType Directory -Force -Path "$DSHREPO\scratch-plugin\src" | Out-Null
-Copy-Item "<本仓库>\llm-wiki\dsh\llm-wiki.ts" "$DSHREPO\scratch-plugin\src\llm-wiki.ts" -Force
-Copy-Item "<本仓库>\llm-wiki\dsh\llm-wiki-distill.ts" "$DSHREPO\scratch-plugin\src\llm-wiki-distill.ts" -Force
+Copy-Item "<本仓库>\archivist\dsh\archivist.ts" "$DSHREPO\scratch-plugin\src\archivist.ts" -Force
+Copy-Item "<本仓库>\archivist\dsh\archivist-distill.ts" "$DSHREPO\scratch-plugin\src\archivist-distill.ts" -Force
 ```
 
-然后二选一挂载（覆盖层模板见 `dsh/llm-wiki.cordis.yml`）：
+然后二选一挂载（覆盖层模板见 `dsh/archivist.cordis.yml`）：
 
 - 临时覆盖层：启动时 `dsh web --patch <改好路径的 yml>`
 - **profile 常驻（推荐）**：向 `%USERPROFILE%\.dsh\profiles\<profile>\cordis.patch.yml` 的 `insert` 列表追加模板中的两条（保持 UTF-8 无 BOM）。
 
 **生效方式**：重启对应 dsh 进程。
-**验证**：启动日志**不得出现** `failed to import` / `did not activate`；会话中可调用 `wiki_status`。
+**验证**：启动日志**不得出现** `failed to import` / `did not activate`；会话中可调用 `archivist_status`。
 
 ### 首次使用（两种宿主通用）
 
 ```
-wiki_init({ path: "D:/llm-wiki" })      # 显式选目录；建议非系统盘，配合 wiki_backup
+archivist_init({ path: "D:/archivist" })      # 显式选目录；建议非系统盘，配合 archivist_backup
 ```
 
 之后把资料放进工作区 `raw/`，按工作区 `AGENTS.md` 的 ingest/query/lint 工作流编译。
@@ -124,32 +124,32 @@ wiki_init({ path: "D:/llm-wiki" })      # 显式选目录；建议非系统盘�
 机器有 Node.js 时（宿主机器一般已具备）：
 
 ```powershell
-cd <本仓库>\llm-wiki
+cd <本仓库>\archivist
 node selftest.mjs
 ```
 
 预期输出：**`49 passed, 0 failed`**（覆盖：初始化/幂等挂回、源状态追踪、中文写页、索引重建、中英检索、容错解析、缓存失效、路径安全、lint、备份轮转等）。
 
-没有 Node.js 时：安装后在会话中调用 `wiki.init` 建一个临时库，再调用 `wiki.status`；能返回 `workspace:` 行即安装成功。
+没有 Node.js 时：安装后在会话中调用 `archivist.init` 建一个临时库，再调用 `archivist.status`；能返回 `workspace:` 行即安装成功。
 
 ## 限制与卸载
 
 - **检索是词法级**（子串 + 统计加权）：同义改写（如"互斥机制"找 synchronized）命中有限；语义级需求待接向量/qmd
-- 单次回答质量受模型窗口限制（检索 + 重合成）；超大库建议先用 `wiki_search` 缩小范围再 `wiki_read`
+- 单次回答质量受模型窗口限制（检索 + 重合成）；超大库建议先用 `archivist_search` 缩小范围再 `archivist_read`
 - 蒸馏钩子只**提醒**，写入由 Agent 决定；状态文件可删（会重新触发首次询问）
 - **卸载**：OpenCode 删除对应插件文件（热加载自动卸载）；dsh 从 profile 移除 `insert` 行并重启。库数据在独立工作区目录，去留自便
 
 ## 维护与构建
 
-- `core/llm-wiki.mjs` 是**唯一逻辑源头**；改动后运行：
+- `core/archivist.mjs` 是**唯一逻辑源头**；改动后运行：
   ```powershell
-  node build/build.mjs     # 重生成 opencode/index.ts 与 dsh/llm-wiki.ts（断言 12 个工具注册）
+  node build/build.mjs     # 重生成 opencode/index.ts 与 dsh/archivist.ts（断言 12 个工具注册）
   ```
 - 两个钩子文件与 `bench/` 为静态工具，直接编辑
 - 基准与统计：
   ```powershell
-  node bench/bench-queries.mjs "D:/llm-wiki" "bench-report.md"   # 20 条查询延迟分位报告
-  node bench/rawstats.mjs "D:/llm-wiki/raw"                      # 语料规模/字符/token 统计
+  node bench/bench-queries.mjs "D:/archivist" "bench-report.md"   # 20 条查询延迟分位报告
+  node bench/rawstats.mjs "D:/archivist/raw"                      # 语料规模/字符/token 统计
   ```
 
 ## 来源与致谢

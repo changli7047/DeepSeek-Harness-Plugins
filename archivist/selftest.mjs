@@ -1,18 +1,18 @@
 /**
- * llm-wiki selftest — runs the full deterministic workflow against a throwaway
+ * archivist selftest — runs the full deterministic workflow against a throwaway
  * workspace and asserts expectations. Host-independent: `node smoke.mjs`.
  */
 import {
   initWorkspace, attachWorkspace, listSources, writePage, readPages, searchWiki,
   lintWiki, appendLog, readLog, estimateTokens, statusWorkspace, backupWorkspace,
   parsePage, rebuildIndex, TOOLS,
-} from './core/llm-wiki.mjs'
+} from './core/archivist.mjs'
 import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 
-const ws = path.join(os.tmpdir(), 'llm-wiki-smoke-' + Date.now())
-process.env.LLM_WIKI_POINTER = path.join(os.tmpdir(), 'llm-wiki-smoke-pointer.json')
+const ws = path.join(os.tmpdir(), 'archivist-smoke-' + Date.now())
+process.env.ARCHIVIST_POINTER = path.join(os.tmpdir(), 'archivist-smoke-pointer.json')
 let pass = 0, fail = 0
 const ok = (name, cond, extra = '') => {
   if (cond) { pass++; console.log('PASS ' + name) }
@@ -137,14 +137,14 @@ try {
   backupWorkspace(ws); backupWorkspace(ws)
   ok('backup keeps multiple snapshots', readdirSync(backupRoot).length === 3)
   const b4 = backupWorkspace(ws, undefined, 1)
-  ok('backup rotation keep=1', readdirSync(backupRoot).filter((e) => e.startsWith('llm-wiki-')).length === 1, b4)
-  ok('backup excludes itself', !readdirSync(path.join(backupRoot, readdirSync(backupRoot).filter(e => e.startsWith('llm-wiki-'))[0])).includes('.backups'))
+  ok('backup rotation keep=1', readdirSync(backupRoot).filter((e) => e.startsWith('archivist-')).length === 1, b4)
+  ok('backup excludes itself', !readdirSync(path.join(backupRoot, readdirSync(backupRoot).filter(e => e.startsWith('archivist-'))[0])).includes('.backups'))
 
   // 12. parse + estimate + tools table
   const pr = parsePage('---\ntitle: A\ntags: [x, y]\n---\nbody')
   ok('frontmatter parse title', pr.fm.title === 'A' && Array.isArray(pr.fm.tags) && pr.fm.tags.length === 2, JSON.stringify(pr.fm))
   ok('token estimate positive', estimateTokens('中文abc') >= 2)
-  ok('tools table complete', TOOLS.length === 12 && TOOLS.every((t) => t.name.startsWith('wiki_')), 'count=' + TOOLS.length)
+  ok('tools table complete', TOOLS.length === 12 && TOOLS.every((t) => t.name.startsWith('archivist_')), 'count=' + TOOLS.length)
 
   console.log(`\n${pass} passed, ${fail} failed`)
   process.exitCode = fail ? 1 : 0

@@ -1,27 +1,27 @@
 #!/usr/bin/env node
 /**
  * Build the two host adapters (OpenCode v2 / dsh) from the single core source
- * (core/llm-wiki.mjs). Uses split/join for the placeholder so `$` characters
+ * (core/archivist.mjs). Uses split/join for the placeholder so `$` characters
  * in the core are never treated as replacement patterns.
  *
  * Outputs:
  *   dist/opencode/index.ts   — self-contained OpenCode plugin
- *   dist/dsh/llm-wiki.ts     — self-contained dsh plugin
+ *   dist/dsh/archivist.ts     — self-contained dsh plugin
  */
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)))
-const core = readFileSync(path.join(root, 'core', 'llm-wiki.mjs'), 'utf8')
+const core = readFileSync(path.join(root, 'core', 'archivist.mjs'), 'utf8')
 
 if (core.includes('__CORE__')) throw new Error('core contains the __CORE__ placeholder — refusing to build')
-const toolCount = (core.match(/name: 'wiki_/g) ?? []).length
+const toolCount = (core.match(/name: 'archivist_/g) ?? []).length
 if (toolCount !== 12) throw new Error(`expected 12 tools in the core, found ${toolCount}`)
 
 const jobs = [
   { template: 'opencode.template.ts', out: 'opencode/index.ts', marker: 'export default Plugin.define', registrations: 'for (const tool of TOOLS)' },
-  { template: 'dsh.template.ts', out: 'dsh/llm-wiki.ts', marker: 'export function apply', registrations: 'ctx.tools.register(defineTool' },
+  { template: 'dsh.template.ts', out: 'dsh/archivist.ts', marker: 'export function apply', registrations: 'ctx.tools.register(defineTool' },
 ]
 
 for (const job of jobs) {
