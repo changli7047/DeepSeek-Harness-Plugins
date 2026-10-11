@@ -12,7 +12,7 @@
 | 插件 | 能力 | 适用端 |
 |---|---|---|
 | [windows-tools](windows-tools/README.md) | Windows 桌面观察与自动化：状态/元素快照、**后台窗口截图**、后台/前台点击与输入、剪贴板、窗口激活与启动、条件等待（12–13 个工具） | OpenCode v2 + dsh |
-| [archivist](archivist/README.md) | 本地长期知识库（原 llm-wiki）：资料/对话编译成互链 markdown wiki（检索、校验、索引、日志、免 git 备份，**实测支持千万 token 级数据量**），含双端「对话蒸馏」钩子（13 工具 + 2 钩子） | OpenCode v2 + dsh |
+| [archivist](archivist/README.md) | 本地长期知识库：资料/对话编译成互链 markdown wiki（检索、校验、索引、日志、免 git 备份，**实测支持千万 token 级数据量**），含双端「对话蒸馏」钩子（13 工具 + 2 钩子） | OpenCode v2 + dsh |
 
 ## 给 AI Agent：如何从此仓库安装插件
 
