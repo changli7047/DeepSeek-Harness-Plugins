@@ -77,6 +77,7 @@ public static class WtNative {
   [DllImport("user32.dll")] public static extern bool ClientToScreen(IntPtr hWnd, ref POINT point);
   [DllImport("user32.dll")] public static extern IntPtr PostMessage(IntPtr hWnd, uint msg, IntPtr wParam, IntPtr lParam);
   [DllImport("user32.dll")] public static extern IntPtr RealChildWindowFromPoint(IntPtr hWndParent, POINT pt);
+  [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern int GetClassName(IntPtr hWnd, StringBuilder text, int count);
 
   public delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
 
@@ -635,6 +636,12 @@ function Get-WtBackgroundInputHandle($found) {
       }
     }
   } catch { }
+  # Qt top-level windows own keyboard routing for all their child surfaces;
+  # posting characters to a native child (e.g. a render surface) is ignored.
+  $classBuffer = New-Object System.Text.StringBuilder 256
+  if ([WtNative]::GetClassName($found.Handle, $classBuffer, 256) -gt 0) {
+    if ($classBuffer.ToString() -match '^Qt\d') { return $found.Handle }
+  }
   $cr = New-Object WtNative+RECT
   [void][WtNative]::GetClientRect($found.Handle, [ref]$cr)
   $child = Get-WtDeepestChildAt $found.Handle ([int](($cr.Right - $cr.Left) / 2)) ([int](($cr.Bottom - $cr.Top) / 2))
@@ -646,6 +653,12 @@ function Invoke-WtBackgroundClick($found, [int]$x, [int]$y, [string]$button) {
   $hwnd = $target.handle
   $clientX = $target.x
   $clientY = $target.y
+  # Qt windows hit-test posted mouse messages in client pixels on the
+  # top-level window; native child surfaces ignore synthetic messages.
+  $classBuffer = New-Object System.Text.StringBuilder 256
+  if ([WtNative]::GetClassName($found.Handle, $classBuffer, 256) -gt 0 -and $classBuffer.ToString() -match '^Qt\d') {
+    $hwnd = $found.Handle
+  }
   $lp = [IntPtr]((($clientY -band 0xFFFF) -shl 16) -bor ($clientX -band 0xFFFF))
   [void][WtNative]::PostMessage($hwnd, 0x0200, [IntPtr]::Zero, $lp)
   Start-Sleep -Milliseconds 40
@@ -672,6 +685,17 @@ function Invoke-WtBackgroundClick($found, [int]$x, [int]$y, [string]$button) {
 
 function Invoke-WtBackgroundType($found, [string]$text) {
   $hwnd = Get-WtBackgroundInputHandle $found
+  $procName = ''
+  try { $procName = (Get-Process -Id $found.ProcessId -ErrorAction Stop).ProcessName } catch { }
+  if ($procName -eq 'Weixin') {
+    # WeChat's custom input stack decodes WM_CHAR as legacy ANSI bytes, not UTF-16.
+    $bytes = [System.Text.Encoding]::Default.GetBytes($text)
+    foreach ($b in $bytes) {
+      [void][WtNative]::PostMessage($hwnd, 0x0102, [IntPtr][int]$b, [IntPtr]::Zero)
+      Start-Sleep -Milliseconds 8
+    }
+    return ('posted {0} bytes (background, ANSI) to window "{1}"' -f $bytes.Length, $found.Title)
+  }
   foreach ($ch in $text.ToCharArray()) {
     $code = [int]$ch
     if ($code -eq 13) { continue }

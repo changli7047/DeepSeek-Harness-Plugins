@@ -129,7 +129,8 @@ $HOST = "$REPO\windows-tools\host\wt-host.ps1"
 ## 限制与安全
 
 - **平台**：仅 Windows 10/11；依赖系统自带 PowerShell 5.1。
-- **后台操作是 best-effort**：经典 Win32 应用可靠；Chromium/Electron/WinUI 等可能部分忽略合成消息；**后台中文输入可能乱码**，需要精确中文输入时用前台 `activate` 模式。
+- **后台操作是 best-effort**：经典 Win32 与 Qt 自绘应用（含微信 4.x 客户端）可靠；Chromium/Electron 可能靠 UIA 命中但不收合成输入，WinUI/UWP 后台中文输入会乱码；此类场景用前台 `activate` 模式。
+- **Qt / 微信适配**：Qt 窗口的后台点击/输入投给**顶层窗口**（渲染子窗口会忽略合成消息）；微信 4.x 的输入栈按 ANSI(GBK) 字节流解码，插件已内置处理，可直接后台输入中文。
 - **后台截图**：被遮挡窗口可抓；**最小化窗口不可抓**（会明确报错）；极少数 GPU 渲染应用可能黑屏。
 - **前台操作**会移动真实光标并改变焦点；能用 `window` 参数就用它，可完全避免打扰。
 - **UIA 元素树**依赖目标应用的无障碍支持：VS Code 需以 `--force-renderer-accessibility` 启动或设置 `"editor.accessibilitySupport": "on"`。
