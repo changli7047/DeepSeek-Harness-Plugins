@@ -554,7 +554,10 @@ function tokenizeQuery(q) {
   for (const run of lower.match(/[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff]+/g) || []) {
     if (run.length === 1) add(run, 1)
     for (let i = 0; i < run.length - 1; i++) add(run.slice(i, i + 2), 1)
-    if (run.length >= 3) add(run, 5)
+    if (run.length >= 3) {
+      // Longer exact CJK phrases are far more discriminative than bigrams.
+      add(run, run.length >= 10 ? 14 : run.length >= 6 ? 9 : 5)
+    }
   }
   // Symbol-bearing latin segments stay whole and weigh more ("b+ tree", "o(log n)"):
   // dropping them degrades such queries to a generic word like "tree". A compact

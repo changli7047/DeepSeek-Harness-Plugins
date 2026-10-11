@@ -68,7 +68,7 @@
 | **1,060 万 token** | 4,752 | 33.4 MB | **160 ms**（p95 214ms） | 592 ms |
 
 - 线性扩展（约 0.14ms/文件）；`mtime+size` 内容缓存让重复查询进入内存档
-- 检索准确率：20 条 ground-truth 断言用例 **Top-1 20/20、Top-3 20/20**（语料含中英文混排）
+- 检索准确率：内置**分类评测台**（`bench/eval.mjs` + `bench/make-eval.mjs`，8 类断言）；实测：含中文真实库 **60/60**、含纠错场景演示库 **10/10**
 - token 估算口径：CJK ≈ 1 字/token；拉丁 ≈ 4 字符/token
 
 **边界说明（诚实声明）**：单次模型注意力仍受上下文窗口限制——"回忆 = 检索 + 重合成"。超过 ~1000 万 token 或高频查询场景，建议后续接入 ripgrep（OpenCode 自带 `~/.cache/opencode/bin/rg.exe`）或向量检索；当前版本为词法级检索，对同义改写的命中有限。
@@ -159,6 +159,13 @@ node selftest.mjs
   node bench/bench-queries.mjs "D:/archivist" "bench-report.md"   # 20 条查询延迟分位报告
   node bench/rawstats.mjs "D:/archivist/raw"                      # 语料规模/字符/token 统计
   ```
+- 分类评测（纯本地、无依赖；期望值生成时冻结，语料大改后重新生成）：
+  ```powershell
+  node bench/make-eval.mjs "D:/archivist" eval-set.json        # 从知识库自动出题
+  node bench/eval.mjs "D:/archivist" eval-set.json report.md   # 运行评测（低于阈值退出非零 = 回归门禁）
+  node bench/eval-demo-setup.mjs <临时目录>                     # 生成含替代/撤回的演示库（验证 correction 类）
+  ```
+  类别：lookup / phrase / needle / multihop / aggregation / correction / mixed / unanswerable；阈值可用 `EVAL_MIN_TOP1`、`EVAL_MIN_OVERALL` 调整
 
 ## 来源与致谢
 
