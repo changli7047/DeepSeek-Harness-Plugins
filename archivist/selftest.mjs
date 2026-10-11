@@ -106,6 +106,26 @@ try {
   const log = readLog(ws, 3)
   ok('log append + read', log.includes('ingest | 笔记一') && log.includes('query | 测试问题'), log.split('\n')[0])
 
+  // 9b. v2 discipline: trust tiers, supersede chain, retraction
+  const wT = writePage(ws, { path: 'sources/trust-probe.md', title: 'Trust Probe', body: '# Trust Probe\n\n原文锚定测试。\n', sourceFile: 'raw/note1.md' })
+  ok('trust: sourceFile page -> medium', readFileSync(path.join(ws, 'wiki', 'sources', 'trust-probe.md'), 'utf8').includes('trust: medium'), wT)
+  const wL = writePage(ws, { path: 'syntheses/trust-low.md', title: 'Trust Low', body: '# Trust Low\n\n无出处派生。\n' })
+  ok('trust: no sourceFile -> low', readFileSync(path.join(ws, 'wiki', 'syntheses', 'trust-low.md'), 'utf8').includes('trust: low'), wL)
+  const wS = writePage(ws, { path: 'concepts/replacement.md', title: 'Replacement', body: '# Replacement\n\n替代测试。\n', supersedes: 'concepts/孤立页.md' })
+  ok('supersede: new page records supersedes', readFileSync(path.join(ws, 'wiki', 'concepts', 'replacement.md'), 'utf8').includes('supersedes: concepts/孤立页.md'), wS)
+  const oldTxt = readFileSync(path.join(ws, 'wiki', 'concepts', '孤立页.md'), 'utf8')
+  ok('supersede: old page flipped to superseded', oldTxt.includes('status: superseded') && oldTxt.includes('superseded_by: concepts/replacement.md'))
+  const supSearch = searchWiki(ws, '孤立页', 10, 'wiki')
+  ok('supersede: search annotates replacement', supSearch.includes('已被'), supSearch.split('\n')[0])
+  const wR = writePage(ws, { path: 'syntheses/trust-low.md', retract: true, retractReason: '测试撤回' })
+  ok('retract: page marked retracted', readFileSync(path.join(ws, 'wiki', 'syntheses', 'trust-low.md'), 'utf8').includes('status: retracted'), wR)
+  const retSearch = searchWiki(ws, 'Trust Low', 10, 'wiki')
+  ok('retract: excluded from search', !retSearch.includes('trust-low'), retSearch.split('\n')[0])
+  const lS = lintWiki(ws)
+  ok('lint: supersede chain clean', !lS.includes('supersede-'), lS.split('\n')[0])
+  const stT = statusWorkspace(ws)
+  ok('status: trust/supersede counts', stT.includes('trust: ') && stT.includes('superseded:1'), (stT.split('\n').find((l) => l.startsWith('trust:')) || 'missing'))
+
   // 10. status
   const st = statusWorkspace(ws)
   ok('status has pages line', st.includes('pages: '), st.split('\n')[0])

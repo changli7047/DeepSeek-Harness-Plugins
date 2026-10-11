@@ -172,15 +172,16 @@ export function wikilinks(text) {
 
 // ---------------------------------------------------------------- workspace init / attach
 
-const AGENTS_TEMPLATE = `# LLM Wiki — Schema & Workflows（由插件生成，可随需修改）
+const AGENTS_TEMPLATE = `# Archivist 知识库 — Schema & Workflows（由插件生成，可随需修改）
 
 本目录是一份"自我维护的知识库"（Karpathy LLM Wiki 模式）。**所有内容由 AI Agent 读写维护**；
-插件提供确定性工具（检索/校验/索引/日志/备份），Agent 负责阅读、写作与综合。
+插件提供确定性工具（检索/校验/索引/日志/备份/纠错），Agent 负责阅读、写作与综合。
 
 ## 目录结构
 
 \`\`\`
 raw/                 # 不可变原始资料（Agent 只读，禁止修改）
+  conversations/     # 对话蒸馏的原文（先说后编）
 wiki/
   index.md           # 目录（由插件 archivist_write / archivist_index 自动重建，勿手改）
   log.md             # 追加式时间线，格式：## [YYYY-MM-DD] 动作 | 标题
@@ -191,48 +192,68 @@ wiki/
   syntheses/         # 存档的问答/分析产物
 \`\`\`
 
-## 页面格式（frontmatter 必须）
+## 页面格式（frontmatter）
 
 \`\`\`yaml
 ---
 title: 页面标题
 type: source | entity | concept | synthesis
 tags: [标签1, 标签2]
-sources: [来源文件名或路径]
+sources: [来源 raw 文件路径]      # 页面结论的依据出处（有则必填）
 summary: 一句话摘要（用于目录）
+trust: high | medium | low       # 信任级别（见下）
+status: active | superseded | retracted   # 替代/撤回时由插件维护，默认 active
+supersedes: 页面相对路径（可选）   # 本页替代了哪一页
+superseded_by: 页面相对路径（可选） # 本页被哪一页替代
 last_updated: YYYY-MM-DD（由 archivist_write 自动填）
 ---
 正文，用 [[页面名]] 建立 wikilink 交叉引用。
 \`\`\`
 
+### 信任级别（trust）
+- \`high\`：用户明确确认或手工编写的内容
+- \`medium\`：有 raw 原文出处（archivist_write 传了 \`sourceFile\` 时自动如此）
+- \`low\`：模型派生、没有原文锚定（未传 \`sourceFile\` 的页默认此级）——检索会标注\`低信任\`，只作导航；**关键事实要回读 raw 原文验证**
+
 ## 工作流
 
-### Ingest（摄入新资料）
+### Ingest（摄入资料）
 1. \`archivist_sources\` 看有哪些 new/changed 的 raw/ 文件
-2. 完整阅读该源文件；对照 \`archivist_read\` 读取 index.md / overview.md 与相关页面
-3. 用 \`archivist_write\` 写 \`sources/<slug>.md\`（传 \`sourceFile: "raw/xxx.md"\` 以登记摄入状态）
-4. 更新/新建涉及的 entities 与 concepts 页面；发现与旧内容矛盾时在新页面 \`tags\` 加 \`contradiction\` 并在正文标注
+2. 完整阅读源文件；用 \`archivist_read\` 读取 index.md / overview.md 与相关页面
+3. \`archivist_write\` 写 \`sources/<slug>.md\`（传 \`sourceFile: "raw/xxx.md"\` 登记摄入；trust 自动 medium）
+4. 更新/新建涉及的 entities 与 concepts 页面；与旧内容矛盾时在新页 \`tags\` 加 \`contradiction\` 并在正文标注
 5. 视需要更新 overview.md 综述
 6. \`archivist_log\` 追加：\`ingest | <标题>\`
-7. \`archivist_lint\` 跑后置校验（断链/孤儿/目录缺失），有问题就修
+7. \`archivist_lint\` 跑后置校验，有问题就修
+
+### Distill（对话蒸馏，raw 优先）
+1. **先把对话落成 raw 原文**：把相关片段（保留用户与 AI 原话）存为 \`raw/conversations/YYYY-MM-DD-主题.md\`
+2. 再按 Ingest 流程编译：\`archivist_write\` 传 \`sourceFile: "raw/conversations/..."\` → 页面 trust=medium
+3. 只写决策/结论/方法，不搬运流水账；没有 raw 出处的页默认 trust=low
 
 ### Query（提问）
-1. \`archivist_search\` 取前 10–15 个相关页
-2. \`archivist_read\` 精读命中页（必要时顺 wikilink 多跳）
-3. 基于页面内容回答，**引用页面路径**；答案有价值时 \`archivist_write\` 存到 \`syntheses/\`
+1. \`archivist_search\` 取前 10–15 个相关页；结果会标注 \`低信任\` / \`已被 xxx 替代\`，已撤回页自动排除
+2. \`archivist_read\` 精读命中页（可顺 wikilink 多跳）；低信任页只作导航，关键事实回读 \`sources\` 指向的 raw 原文验证，或在回答中声明来源级别
+3. 基于页面回答并引用页面路径；答案有价值时 \`archivist_write\` 存到 \`syntheses/\`
 4. \`archivist_log\` 追加：\`query | <问题>\`
 
+### 纠错（永不覆盖历史）
+- 修正：用 \`archivist_write({ path: "新页.md", supersedes: "旧页.md" })\` 写替代页；旧页自动标记 \`superseded\`（检索降权并标注）
+- 撤回：\`archivist_write({ path: "旧页.md", retract: true, retractReason: "原因" })\`（检索排除）
+- 不要直接改写旧页结论了事；lint 会检查替代链完整性
+
 ### Lint（周期性体检）
-- \`archivist_lint\` 查结构问题（断链、孤儿页、目录缺漏、缺 frontmatter、重复标题）
-- 语义问题（矛盾、过时结论）由 Agent 阅读相关页后处理；缺页高频提及用 lint 的 missingPages 提示
+- \`archivist_lint\` 查：断链、孤儿页、目录缺漏、缺 frontmatter、重复标题、非法 trust/status、替代链不完整
+- 语义问题（矛盾、过时结论）由 Agent 阅读相关页后处理；高频提及未建页看 missingPages 提示
 
 ### 备份 / 版本
-- \`archivist_backup\`：免 git 快照（默认存本目录 .backups/，建议参数指向别的磁盘或云盘目录；自动轮转保留 10 份）
-- 有 git 时可用 \`archivist_commit\` 提交版本；无 git 不影响使用
+- \`archivist_backup\`：免 git 快照（默认存本目录 .backups/，建议 target 指向别的磁盘或云盘目录；轮转保留 10 份）
+- 有 git 时可用 \`archivist_commit\`；无 git 不影响使用
 
 ## 规则
 - \`raw/\` 永不修改；一切衍生内容写进 \`wiki/\`
-- 每个事实尽量给出 \`sources:\` 引用；不确定的内容标注不确定性
+- **能影响回答的事实都要能回到 raw 出处**；回流不了的标注 \`trust: low\`
+- 修正用替代/撤回记录，不覆盖历史
 - 页面保持原子化（一页一主题），标题清晰，wikilink 至少连 2 个其他页
 `
 
@@ -403,13 +424,48 @@ export function writePage(dir, args) {
   const abs = path.join(dir, WIKI, rel)
   const existingText = existsSync(abs) ? readFileSync(abs, 'utf8') : ''
   const existing = parsePage(existingText)
+
+  // Retraction: flip status in place without touching the body (history stays auditable).
+  if (args.retract === true) {
+    if (!existingText) throw new Error(`cannot retract a page that does not exist: wiki/${rel}`)
+    const fmRetract = {
+      ...existing.fm,
+      title: existing.fm.title || path.basename(rel, '.md'),
+      type: existing.fm.type || (parts.length === 2 ? TYPE_BY_DIR[parts[0]] : 'synthesis'),
+      status: 'retracted',
+      retractReason: String(args.retractReason ?? '(no reason given)'),
+      last_updated: today(),
+    }
+    writeFileSync(abs + '.tmp', serializePage(fmRetract, existing.body.trimEnd() + '\n'))
+    renameSync(abs + '.tmp', abs)
+    if (args.index !== false) rebuildIndex(dir)
+    appendLog(dir, `retract | wiki/${rel}${args.retractReason ? ' — ' + String(args.retractReason) : ''}`)
+    return `retracted wiki/${rel}${args.retractReason ? ' (' + String(args.retractReason) + ')' : ''}`
+  }
+
   const dirType = parts.length === 2 ? TYPE_BY_DIR[parts[0]] : 'synthesis'
+  const trust = args.trust !== undefined
+    ? String(args.trust)
+    : (existing.fm.trust || (args.sourceFile ? 'medium' : 'low'))
+  if (!['high', 'medium', 'low'].includes(trust)) throw new Error(`invalid trust "${trust}" — use high | medium | low`)
+  const status = args.status !== undefined ? String(args.status) : (existing.fm.status || 'active')
+  if (!['active', 'superseded', 'retracted'].includes(status)) {
+    throw new Error(`invalid status "${status}" — use active | superseded | retracted`)
+  }
+  const supersedes = args.supersedes !== undefined
+    ? fwd(String(args.supersedes)).replace(/^wiki\//, '')
+    : (existing.fm.supersedes || undefined)
   const fm = {
     title: args.title || existing.fm.title || path.basename(rel, '.md'),
     type: args.type || existing.fm.type || dirType,
     tags: args.tags || existing.fm.tags || [],
     sources: args.sources || existing.fm.sources || [],
     ...(args.summary || existing.fm.summary ? { summary: args.summary || existing.fm.summary } : {}),
+    trust,
+    ...(status !== 'active' ? { status } : {}),
+    ...(supersedes ? { supersedes } : {}),
+    ...(existing.fm.superseded_by ? { superseded_by: existing.fm.superseded_by } : {}),
+    ...(existing.fm.retractReason ? { retractReason: existing.fm.retractReason } : {}),
     last_updated: today(),
   }
   if (typeof fm.title !== 'string' || !fm.title.trim()) throw new Error('page title is required')
@@ -424,10 +480,22 @@ export function writePage(dir, args) {
     recordIngest(dir, fwd(String(args.sourceFile)), fwd(path.posix.join(WIKI, rel)))
     logNote = ' | source marked ingested'
   }
+  let superNote = ''
+  if (args.supersedes !== undefined) {
+    const oldRel = fwd(String(args.supersedes)).replace(/^wiki\//, '')
+    if (!inside(path.join(dir, WIKI), oldRel)) throw new Error('supersedes path must stay inside wiki/: ' + oldRel)
+    const oldAbs = path.join(dir, WIKI, oldRel)
+    if (!existsSync(oldAbs)) throw new Error(`supersedes target not found: wiki/${oldRel}`)
+    const old = parsePage(readFileSync(oldAbs, 'utf8'))
+    const oldFm = { ...old.fm, status: 'superseded', superseded_by: rel, last_updated: today() }
+    writeFileSync(oldAbs, serializePage(oldFm, old.body.trimEnd() + '\n'))
+    appendLog(dir, `supersede | wiki/${rel} ← wiki/${oldRel}`)
+    superNote = ` | superseded wiki/${oldRel}`
+  }
   let idxNote = ''
   if (args.index !== false) { rebuildIndex(dir); idxNote = ' | index rebuilt' }
   if (args.log) appendLog(dir, String(args.log))
-  return `${existingText ? 'updated' : 'created'} wiki/${rel}${idxNote}${logNote}${args.log ? ' | logged' : ''}`
+  return `${existingText ? 'updated' : 'created'} wiki/${rel} (trust:${trust})${idxNote}${logNote}${superNote}${args.log ? ' | logged' : ''}`
 }
 
 function resolveRead(dir, relRaw) {
@@ -454,9 +522,16 @@ export function readPages(dir, paths) {
   let total = 0
   for (const p of list) {
     const hit = resolveRead(dir, p)
+    const { fm } = parsePage(hit.text)
+    const flags = []
+    if (fm.status === 'superseded') flags.push(`已被替代${fm.superseded_by ? ' → wiki/' + fm.superseded_by : ''}（请优先读替代页）`)
+    if (fm.status === 'retracted') flags.push(`已撤回${fm.retractReason ? '（' + fm.retractReason + '）' : ''}——不要作为事实依据`)
+    if (fm.trust === 'low') flags.push('低信任（模型派生，未锚定 raw 原文）')
+    if (fm.trust === 'high') flags.push('高信任（用户确认）')
+    const banner = flags.length ? `〔状态：${flags.join('；')}〕\n` : ''
     const slice = hit.text.length > READ_CHAR_CAP / list.length ? hit.text.slice(0, Math.floor(READ_CHAR_CAP / list.length)) + '\n…(truncated)' : hit.text
     total += slice.length
-    parts.push(`===== wiki/${hit.rel} =====\n${slice}`)
+    parts.push(`===== wiki/${hit.rel} =====\n${banner}${slice}`)
   }
   return parts.join('\n\n') + `\n\n(read ${list.length} page(s), ${total} chars)`
 }
@@ -575,23 +650,36 @@ export function searchWiki(dir, query, limit = 15, scope = 'wiki') {
     results.push(...scoreDocuments(docs, tokens))
   }
   if (scope === 'wiki' || scope === 'all') {
-    const docs = listPages(dir).map((p) => ({
-      label: 'wiki/' + p.rel,
-      title: p.title,
-      summary: p.fm.summary,
-      text: p.body,
-      lower: p.body.toLowerCase(),
-      name: p.title.toLowerCase(),
-      tags: p.fm.tags || [],
-    }))
-    results.push(...scoreDocuments(docs, tokens))
+    const docs = listPages(dir)
+      .filter((p) => p.fm.status !== 'retracted')
+      .map((p) => ({
+        label: 'wiki/' + p.rel,
+        title: p.title,
+        summary: p.fm.summary,
+        text: p.body,
+        lower: p.body.toLowerCase(),
+        name: p.title.toLowerCase(),
+        tags: p.fm.tags || [],
+        status: p.fm.status || 'active',
+        trust: p.fm.trust,
+        supersededBy: p.fm.superseded_by,
+      }))
+    const scored = scoreDocuments(docs, tokens)
+    for (const r of scored) if (r.status === 'superseded') r.score = Math.round(r.score * 35) / 100
+    results.push(...scored)
   }
   results.sort((a, b) => b.score - a.score)
   const top = results.slice(0, Math.max(1, Math.min(30, limit)))
   if (!top.length) {
     return `no match for "${query}" (scope: ${scope}). Try other keywords, widen scope to 'all', or read wiki/index.md / wiki/overview.md directly.`
   }
-  return top.map((r, i) => `${i + 1}. [${r.score}] ${r.label} — ${r.title}${r.summary ? ' | ' + r.summary : ''}\n   ${r.snippet}`).join('\n')
+  return top.map((r, i) => {
+    const marks = []
+    if (r.status === 'superseded') marks.push(`已被 ${r.supersededBy ? 'wiki/' + r.supersededBy : '其他页'} 替代`)
+    if (r.trust === 'low') marks.push('低信任')
+    const mark = marks.length ? `（${marks.join('；')}）` : ''
+    return `${i + 1}. [${Math.round(r.score * 10) / 10}] ${r.label} — ${r.title}${mark}${r.summary ? ' | ' + r.summary : ''}\n   ${r.snippet}`
+  }).join('\n')
 }
 
 // ---------------------------------------------------------------- lint
@@ -648,6 +736,37 @@ export function lintWiki(dir, opts = {}) {
   for (const h of hrefs) {
     if (!relSet.has(h)) issues.push({ type: 'index-broken', page: 'index.md', target: h, message: `index links to missing page: ${h}` })
   }
+  // trust / status validity and supersede-chain integrity
+  const relIndex = new Map(pages.map((p) => [p.rel.replace(/\.md$/i, '').toLowerCase(), p]))
+  const lookRel = (v) => relIndex.get(fwd(String(v)).replace(/^wiki\//, '').replace(/\.md$/i, '').toLowerCase())
+  for (const p of pages) {
+    if (p.fm.trust && !['high', 'medium', 'low'].includes(String(p.fm.trust))) {
+      issues.push({ type: 'invalid-frontmatter', page: p.rel, message: `invalid trust "${p.fm.trust}" (use high|medium|low)` })
+    }
+    if (p.fm.status && !['active', 'superseded', 'retracted'].includes(String(p.fm.status))) {
+      issues.push({ type: 'invalid-frontmatter', page: p.rel, message: `invalid status "${p.fm.status}" (use active|superseded|retracted)` })
+    }
+    if (p.fm.status === 'superseded') {
+      if (!p.fm.superseded_by) {
+        issues.push({ type: 'supersede-incomplete', page: p.rel, message: 'superseded page without superseded_by' })
+      } else {
+        const target = lookRel(p.fm.superseded_by)
+        if (!target) {
+          issues.push({ type: 'supersede-target-missing', page: p.rel, target: String(p.fm.superseded_by), message: 'superseded_by points to a missing page' })
+        } else if (fwd(String(target.fm.supersedes || '')).replace(/^wiki\//, '').replace(/\.md$/i, '').toLowerCase() !== p.rel.replace(/\.md$/i, '').toLowerCase()) {
+          issues.push({ type: 'supersede-mismatch', page: target.rel, target: p.rel, message: `replacement page does not list supersedes back to wiki/${p.rel}` })
+        }
+      }
+    }
+    if (p.fm.supersedes) {
+      const old = lookRel(p.fm.supersedes)
+      if (!old) {
+        issues.push({ type: 'supersede-target-missing', page: p.rel, target: String(p.fm.supersedes), message: 'supersedes points to a missing page' })
+      } else if (old.fm.status !== 'superseded') {
+        issues.push({ type: 'supersede-incomplete', page: old.rel, message: `wiki/${p.rel} claims to replace this page but status is not superseded` })
+      }
+    }
+  }
   const counts = {}
   for (const i of issues) counts[i.type] = (counts[i.type] || 0) + 1
   const summary = `lint: ${pages.length} page(s), ${issues.length} issue(s)${Object.keys(counts).length ? ' — ' + Object.entries(counts).map(([k, v]) => `${k}:${v}`).join(', ') : ' — clean'}`
@@ -700,11 +819,20 @@ export function statusWorkspace(dir) {
   const sources = listSources(dir)
   const srcCounts = { new: 0, changed: 0, ingested: 0 }
   for (const s of sources) srcCounts[s.status]++
+  const trustCounts = { high: 0, medium: 0, low: 0, untagged: 0 }
+  const statusCounts = { superseded: 0, retracted: 0 }
+  for (const p of pages) {
+    const k = ['high', 'medium', 'low'].includes(String(p.fm.trust)) ? String(p.fm.trust) : 'untagged'
+    trustCounts[k]++
+    if (p.fm.status === 'superseded') statusCounts.superseded++
+    if (p.fm.status === 'retracted') statusCounts.retracted++
+  }
   const ptr = readPointer()
   return [
     `workspace: ${dir}`,
     `pointer: ${ptr ? ptr.dir : '(none)'}${ptr && ptr.dir === dir ? ' (matches)' : ''}`,
     `pages: ${pages.length} (${Object.entries(byType).map(([k, v]) => `${k}:${v}`).join(', ') || 'empty'})${wikiTokens ? ` | ~${wikiTokens} tokens (estimate)` : ''}`,
+    `trust: high:${trustCounts.high} medium:${trustCounts.medium} low:${trustCounts.low} untagged:${trustCounts.untagged} | superseded:${statusCounts.superseded} retracted:${statusCounts.retracted}`,
     `sources: ${sources.length} (new:${srcCounts.new}, changed:${srcCounts.changed}, ingested:${srcCounts.ingested})`,
     ptr?.dir && ptr.dir !== dir ? `warning: pointer points elsewhere (${ptr.dir}); use archivist_attach to switch` : '',
     `schema: ${path.join(dir, SCHEMA_FILE)}`,
@@ -808,7 +936,7 @@ export const TOOLS = [
   },
   {
     name: 'archivist_status',
-    description: 'Workspace overview: page counts, token estimate, raw source states (new/changed/ingested), pointer path, last log entries, schema path.',
+    description: 'Workspace overview: page counts, token estimate, trust/supersede counts, raw source states (new/changed/ingested), pointer path, last log entries, schema path.',
     schema: { type: 'object', properties: { workspace: WS_PROP }, additionalProperties: false },
     run: (a) => statusWorkspace(resolveDir(a.workspace)),
   },
@@ -826,7 +954,7 @@ export const TOOLS = [
   },
   {
     name: 'archivist_search',
-    description: 'Search the knowledge base by keyword (CJK bigram aware) with snippets. Scope: wiki (compiled pages, default), raw (original source documents), or all. Read the top hits with archivist_read (raw hits with the normal file read tool) before answering.',
+    description: 'Search the knowledge base by keyword (CJK bigram aware) with snippets. Scope: wiki (compiled pages, default), raw (original source documents), or all. Superseded pages are downranked and annotated with their replacement; retracted pages are excluded and low-trust pages are marked. Read the top hits with archivist_read (raw hits with the normal file read tool) before answering.',
     schema: {
       type: 'object',
       properties: {
@@ -842,7 +970,7 @@ export const TOOLS = [
   },
   {
     name: 'archivist_read',
-    description: 'Read one or more wiki pages by path (e.g. "concepts/Foo.md"), including frontmatter. Batch to follow cross-references.',
+    description: 'Read one or more wiki pages by path (e.g. "concepts/Foo.md"), including frontmatter. A status banner shows trust tier and superseded/retracted state. Batch to follow cross-references.',
     schema: {
       type: 'object',
       properties: {
@@ -856,7 +984,7 @@ export const TOOLS = [
   },
   {
     name: 'archivist_write',
-    description: 'Create or update a wiki page. Validates and auto-fills frontmatter (title/type/tags/sources/summary/last_updated); rebuilds index.md; optional sourceFile marks a raw source ingested; optional log appends a log entry. raw/ stays read-only.',
+    description: 'Create or update a wiki page (or retract one). Validates and auto-fills frontmatter (title/type/tags/sources/summary/trust/status/last_updated); rebuilds index.md; sourceFile marks a raw source ingested (trust defaults to medium, otherwise low); supersedes marks the target page superseded (corrections never overwrite history); retract flips a page to retracted with a reason; log appends a log entry. raw/ stays read-only.',
     schema: {
       type: 'object',
       properties: {
@@ -865,8 +993,13 @@ export const TOOLS = [
         dir: { type: 'string', enum: ['sources', 'entities', 'concepts', 'syntheses'], description: 'Target folder (default: concepts) when path is omitted.' },
         body: { type: 'string', description: 'Markdown body; use [[Page Title]] wikilinks for cross-references.' },
         tags: { type: 'array', items: { type: 'string' }, description: 'Tags.' },
-        sources: { type: 'array', items: { type: 'string' }, description: 'Source references for this page.' },
+        sources: { type: 'array', items: { type: 'string' }, description: 'Raw source references backing this page.' },
         summary: { type: 'string', description: 'One-line summary shown in index.md.' },
+        trust: { type: 'string', enum: ['high', 'medium', 'low'], description: 'Trust tier; defaults to medium when sourceFile is given, otherwise low.' },
+        status: { type: 'string', enum: ['active', 'superseded', 'retracted'], description: 'Page status; normally maintained by the supersedes/retract flows.' },
+        supersedes: { type: 'string', description: 'Wiki-relative path of the page this one replaces; the old page is automatically marked superseded (history is preserved).' },
+        retract: { type: 'boolean', description: 'Retract the existing page (status -> retracted) without editing its body.' },
+        retractReason: { type: 'string', description: 'Reason recorded when retract is true.' },
         sourceFile: { type: 'string', description: 'Raw source path (e.g. "raw/foo.md") to mark ingested by this page.' },
         log: { type: 'string', description: 'Append this log entry, e.g. "ingest | Title".' },
         workspace: WS_PROP,
@@ -888,7 +1021,7 @@ export const TOOLS = [
   },
   {
     name: 'archivist_lint',
-    description: 'Structural health check: broken wikilinks, orphan pages, missing frontmatter, duplicate titles, index coverage, frequently linked-but-missing pages. Use fix:true to also rebuild index.md.',
+    description: 'Structural health check: broken wikilinks, orphan pages, missing frontmatter, duplicate titles, index coverage, frequently linked-but-missing pages, invalid trust/status values, and supersede-chain integrity. Use fix:true to also rebuild index.md.',
     schema: {
       type: 'object',
       properties: {

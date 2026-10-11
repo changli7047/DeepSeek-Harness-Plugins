@@ -37,6 +37,12 @@
 | `archivist_backup` | `archivist.backup` | 免 git 快照备份 + 轮转（建议 target 指向别的盘/云盘目录） |
 | `archivist_commit` | `archivist.commit` | 可选：`git add + commit`（无 git 不影响使用） |
 
+## 引用纪律与纠错语义（v2）
+
+- **trust 分级**：页面默认 `medium`（有 raw 出处）或 `low`（模型派生、无出处）；`high` 保留给用户确认内容。检索会给低信任页标注`低信任`，`archivist_read`/`archivist.read` 返回状态横幅
+- **raw-first 蒸馏**：对话先落 `raw/conversations/` 原文，再编译成页（`sourceFile` 锚定出处）——蒸馏产物可回查、可审计
+- **纠错永不覆盖历史**：`supersedes` 写替代页（旧页自动 `superseded`，检索降权并标注替代关系）；`retract` 撤回（检索排除）；`archivist_lint`/`archivist.lint` 校验替代链完整性
+
 ## 对话蒸馏钩子（可选组件）
 
 | 宿主 | 文件 | 挂点 |

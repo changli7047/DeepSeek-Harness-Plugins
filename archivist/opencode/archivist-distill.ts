@@ -28,13 +28,13 @@ const FIRST_RUN_TEXT = [
   "archivist 蒸馏钩子首次运行：用户刚刚把 archivist 本地知识库接入了本 harness。",
   "请先用一句话询问用户：「要不要把你之前和我的对话内容蒸馏进 archivist？」",
   "说明要点：只提炼关键决策、结论与方法，不全量搬运聊天记录；可让用户指定时间范围或会话。",
-  "用户同意后再执行（逐段提炼成 wiki 页面，用 archivist.write / archivist.log 写入，参考工作区 AGENTS.md 的 schema）。",
+  "用户同意后按 raw-first 流程执行：① 先把相关对话片段（保留原话）保存为 raw/conversations/YYYY-MM-DD-主题.md；② 再用 archivist.write 编译成 wiki 页并传 sourceFile 指向该原文（信任级别自动为 medium）；③ 没有原文出处的页默认标记为低信任。参考工作区 AGENTS.md 的 schema。",
   "用户说不用就跳过，不要再问。问完后继续当前正常的任务。",
 ].join("\n")
 
 const NUDGE_TEXT = [
   "archivist 提醒：若刚才的对话产生了值得长期保留的内容（决策、结论、方法、重要事实），",
-  "请用 archivist 工具沉淀（archivist.write 写页 / archivist.log 记一条）。",
+  "请按 raw-first 沉淀：先把原文存到 raw/conversations/，再 archivist.write 编译（无原文出处会被标为低信任）；archivist.log 记一条。",
   "没有值得沉淀的请忽略本提醒——不要为填而填，也不要因此打断用户。",
 ].join("")
 
