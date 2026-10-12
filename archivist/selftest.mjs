@@ -395,6 +395,25 @@ try {
   ok('frontmatter: line separators are folded instead of splitting the record',
     dupKeys(sep).length === 0 && parsePage(sep).fm.summary === 'a b c', JSON.stringify(parsePage(sep).fm.summary))
 
+  // 第七轮：YAML 指示符开头的值必须被引用（否则 flow 序列非法或被真 YAML 读成注释）
+  const risky = ['#research', 'alpha', '-dash', '@at', '%pct', 'null', '~', 'true', '123', 'a: b', 'a #c']
+  writePage(capWs, { path: 'concepts/Risky.md', title: 'Risky', tags: risky, body: '# Risky\n' })
+  const riskyRaw = readFileSync(path.join(concDir, 'Risky.md'), 'utf8')
+  const riskyLine = /^tags: .*$/m.exec(riskyRaw)[0]
+  ok('frontmatter: YAML-indicator values are quoted so a flow list stays valid',
+    ['"#research"', '"-dash"', '"@at"', '"%pct"', '"null"', '"~"', '"true"', '"123"', '"a: b"', '"a #c"'].every((q) => riskyLine.includes(q)),
+    riskyLine)
+  ok('frontmatter: quoted indicator values round-trip exactly and never duplicate a key',
+    dupKeys(riskyRaw).length === 0 && parsePage(riskyRaw).fm.tags.join('|') === risky.join('|'),
+    JSON.stringify(parsePage(riskyRaw).fm.tags))
+
+  writeFileSync(path.join(concDir, 'SeqOdd.md'),
+    '---\ntitle: SeqOdd\ntype: concept\ntags:\n  - alpha\n  - #x\ntrust: low\n---\nbody\n')
+  writePage(capWs, { path: 'concepts/SeqOdd.md', body: 'body2\n' })
+  const seqOdd = readFileSync(path.join(concDir, 'SeqOdd.md'), 'utf8')
+  ok('frontmatter: a block sequence with a comment item is kept verbatim, not normalised',
+    dupKeys(seqOdd).length === 0 && /tags:\n {2}- alpha\n {2}- #x/.test(seqOdd), seqOdd.split('\n').slice(0, 12).join(' / '))
+
   const statusTool = TOOLS.find((t) => t.name === 'archivist_status')
   let unknownThrew = false
   try { runTool(statusTool, { workspace: ws, bogusUnknownParam: 42 }) } catch { unknownThrew = true }

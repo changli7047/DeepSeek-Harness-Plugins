@@ -132,13 +132,22 @@ function inside(root, rel) {
 // update rewrites the same bytes forever (JSON.stringify was not invertible here: the
 // parser stripped quotes without decoding escapes, so backslashes accumulated per update).
 const encValue = (v) => '"' + String(v).replace(/\\/g, '\\\\').replace(/"/g, '\\"') + '"'
+// Values are emitted in the quoted form whenever our own parser would misread them, or a
+// real YAML parser would read them differently: YAML indicators, ": ", " #", the empty
+// string, and type-like scalars (null/~/booleans/numbers) that must stay strings.
+const needsQuote = (s) => s === ''
+  || /["'\\\[\]{}]/.test(s)
+  || /^[\s#%&*!|>'"?@`-]/.test(s)
+  || /:\s|:$|\s#/.test(s)
+  || /^(~|null|true|false)$/i.test(s)
+  || /^[-+]?(\d+(\.\d*)?|\.\d+)([eE][-+]?\d+)?$/.test(s)
 const quoteScalar = (v) => {
   const s = oneLine(v)
-  return /["'\\[\]]/.test(s) ? encValue(s) : s
+  return needsQuote(s) ? encValue(s) : s
 }
 const quoteItem = (v) => {
   const s = oneLine(v)
-  return /[,\[\]"'\\]/.test(s) ? encValue(s) : s
+  return needsQuote(s) || s.includes(',') ? encValue(s) : s
 }
 function unquote(v) {
   if (v.length >= 2 && v.startsWith('"') && v.endsWith('"')) {
@@ -170,6 +179,15 @@ function splitItems(inner) {
   return out.map((s) => s.trim()).filter(Boolean)
 }
 
+// A block-sequence item is only turned into a list element when it is a plain scalar:
+// "- #x" is a comment, "- - x" a nested sequence, "- k: v" a mapping, "- |" a block scalar.
+function isPlainItem(l) {
+  if (!/^\s*-\s+\S/.test(l)) return false
+  const body = l.replace(/^\s*-\s+/, '').trim()
+  if (/^[-#?|>&*!%@`\[{]/.test(body)) return false
+  return !/^[^\s:]+:(\s|$)/.test(body)
+}
+
 // A block introduced by a bare "key:" line is parsed back into a value when its shape is
 // simple (flow array, scalar list, one plain scalar); anything else is kept verbatim by the
 // caller. Returning undefined means "keep the block intact".
@@ -178,7 +196,7 @@ function parseBlock(kv, cont) {
   const joined = [inline, ...cont.map((l) => l.trim())].filter(Boolean).join(' ')
   if (joined.startsWith('[') && joined.endsWith(']')) return splitItems(joined.slice(1, -1))
   const items = cont.filter((l) => l.trim() !== '')
-  if (inline === '' && items.length && items.every((l) => /^\s*-\s+\S/.test(l) && !/^\s*-\s+\S+:(\s|$)/.test(l))) {
+  if (inline === '' && items.length && items.every(isPlainItem)) {
     return items.map((l) => unquote(l.replace(/^\s*-\s+/, '').trim()))
   }
   if (inline === '' && cont.length === 1 && cont[0].trim() && !/^\S+:(\s|$)/.test(cont[0].trim())) {
