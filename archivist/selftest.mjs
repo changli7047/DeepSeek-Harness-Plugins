@@ -592,10 +592,37 @@ try {
   const emb1 = readFileSync(path.join(concDir, 'Embedded.md'), 'utf8')
   writePage(capWs, { path: 'concepts/Embedded.md', body: 'e3\n' })
   const emb2 = readFileSync(path.join(concDir, 'Embedded.md'), 'utf8')
-  ok('write: a keyless junk line followed by an indented line survives repeated updates',
-    emb2.includes('# junktext') && emb2.includes('  more text') && String(parsePage(emb2).fm.trust) === 'low'
+  ok('write: a keyless junk line and its stray continuation survive as flat comments',
+    emb2.includes('# junktext') && emb2.includes('# more text') && String(parsePage(emb2).fm.trust) === 'low'
+      && !/^\s+\S/m.test(/^---\r?\n([\s\S]*?)\r?\n---/.exec(emb2)[1])
       && emb1.replace('e2', 'X') === emb2.replace('e3', 'X'),
-    emb2.split('\n').slice(-5).join(' / '))
+    emb2.split('\n').slice(-6).join(' / '))
+
+  // 无键行必须拍平：留着缩进会被前一个标量键吞掉（静默改值）
+  writeFileSync(path.join(concDir, 'ScalarJoin.md'),
+    '---\ntitle: ScalarJoin\ntype: concept\ntrust: low\n x\n  plain\n---\nbody\n')
+  writePage(capWs, { path: 'concepts/ScalarJoin.md', body: 'j1\n' })
+  writePage(capWs, { path: 'concepts/ScalarJoin.md', body: 'j2\n' })
+  const sjRaw = readFileSync(path.join(concDir, 'ScalarJoin.md'), 'utf8')
+  ok('write: a stray line cannot be absorbed into the previous scalar',
+    /^trust: low$/m.test(sjRaw) && sjRaw.includes('# x') && sjRaw.includes('# plain')
+      && !/^\s+\S/m.test(/^---\r?\n([\s\S]*?)\r?\n---/.exec(sjRaw)[1]),
+    sjRaw.split('\n').slice(0, 9).join(' / '))
+
+  // 空 tag 不得被静默丢弃
+  writeFileSync(path.join(concDir, 'EmptyTag.md'),
+    '---\ntitle: EmptyTag\ntype: concept\ntags: [a, "", b]\ntrust: low\n---\nbody\n')
+  writePage(capWs, { path: 'concepts/EmptyTag.md', body: 't1\n' })
+  const etTags = parsePage(readFileSync(path.join(concDir, 'EmptyTag.md'), 'utf8')).fm.tags
+  ok('frontmatter: an empty list item is preserved instead of silently dropped',
+    Array.isArray(etTags) && etTags.length === 3 && etTags[0] === 'a' && etTags[1] === '' && etTags[2] === 'b',
+    JSON.stringify(etTags))
+
+  // lint 必须对"通用 YAML 解析器读不了"的页给出信号
+  writeFileSync(path.join(concDir, 'OrphanFm.md'),
+    '---\ntitle: OrphanFm\ntype: concept\ntrust: low\n  orphan line\n---\nbody\n')
+  ok('lint: an indented frontmatter line with no parent key is reported',
+    lintWiki(capWs).includes('unparseable-frontmatter'), lintWiki(capWs).split('\n')[0])
 
   const statusTool = TOOLS.find((t) => t.name === 'archivist_status')
   let unknownThrew = false

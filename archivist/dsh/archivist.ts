@@ -176,6 +176,7 @@ function unquote(v) {
 // Split a flow list on commas outside quotes. Escapes are interpreted only inside quotes,
 // so a bare item keeps its backslashes verbatim.
 function splitItems(inner) {
+  if (inner.trim() === '') return []
   const out = []
   let cur = '', quoted = false, esc = false
   for (const ch of inner) {
@@ -186,7 +187,8 @@ function splitItems(inner) {
     cur += ch
   }
   out.push(cur)
-  return out.map((s) => s.trim()).filter(Boolean)
+  // Empty items are kept: dropping them silently changed "[a, \"\", b]" into "[a, b]".
+  return out.map((s) => s.trim())
 }
 
 // A block-sequence item is only turned into a list element when it is a plain scalar:
@@ -230,18 +232,23 @@ export function parsePage(text) {
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i]
     const kv = /^([A-Za-z_][\w-]*)\s*:\s*(.*)$/.exec(line)
-    if (kv && indentAt(i + 1)) {
+    const inline = kv ? kv[2].trim() : ''
+    // Only an empty value, a block-scalar indicator, or an unterminated flow list opens a block.
+    // "trust: low" followed by indented lines is NOT a block: those lines are strays that a YAML
+    // parser would fold into the scalar, so they must be handled as keyless extras instead.
+    const opensBlock = /^$/.test(inline) || /^[|>][+-]?\d*$/.test(inline) || (inline.startsWith('[') && !inline.endsWith(']'))
+    if (kv && opensBlock && indentAt(i + 1)) {
       let j = i + 1
       while (j < lines.length && (indentAt(j) || (lines[j].trim() === '' && indentAt(j + 1)))) j++
       const cont = lines.slice(i + 1, j)
       const value = parseBlock(kv, cont)
-      if (value === undefined) extra.push({ key: kv[1], lines: [line, ...cont], nextIndented: true })
+      if (value === undefined) extra.push({ key: kv[1], lines: [line, ...cont] })
       else fm[kv[1]] = value
       i = j - 1
       continue
     }
-    if (!kv) { extra.push({ key: null, lines: [line], nextIndented: indentAt(i + 1) }); continue }
-    let v = kv[2].trim()
+    if (!kv) { extra.push({ key: null, lines: [line] }); continue }
+    let v = inline
     if (v.startsWith('[') && v.endsWith(']')) v = splitItems(v.slice(1, -1))
     else v = unquote(v)
     fm[kv[1]] = v
@@ -469,35 +476,33 @@ function sanitizeFm(fm, strict = new Set(), stats) {
   }
   return fm
 }
-// Verbatim blocks are inherited text too. A block line carrying a character YAML cannot store
-// must stay structurally in place: an already-indented line is commented *in place* (keeping
-// its indentation, so following lines keep their parent — commenting at column 0 orphaned
-// them, and a commented key line made the next parse read a bare "key:" and destroy the block);
-// a column-0 line just gets the character replaced by a space, because commenting a block
-// header would detach its content.
+// Verbatim blocks are inherited text too, and the result must stay parseable by a real YAML
+// parser without ever promoting junk into a live key:
+//  - a KEYED entry is a real block ("raw: |", "meta:"): its lines keep their place, and a line
+//    carrying an unstorable character is commented *in place* (indentation preserved, so the
+//    following block lines keep their parent). Its column-0 header keeps its text with the
+//    character merely replaced — commenting a header would detach the whole block.
+//  - a KEYLESS line is outside any block (junk, a stray continuation, a document marker): it is
+//    flattened to a column-0 comment. Left indented, the previous scalar absorbs it (a silent
+//    value change); left with the replacement space, it can become a live key on the next parse.
 function sanitizeExtra(extra, stats) {
-  // `keepText` marks a line whose next frontmatter line is indented — a block header. Commenting
-  // it would detach its content, so its characters are merely replaced in place instead.
-  const fixLine = (line, keepText) => {
-    const s = String(line)
-    const hits = s.match(YAML_BAD)
-    if (!hits) return s
-    if (stats) stats.cleaned += hits.length
-    const cleaned = s.replace(YAML_BAD, ' ')
-    // Indentation must come from the ORIGINAL line: the space that replaced a leading bad
-    // character is not indentation, and treating it as such shifted the whole line.
-    const indent = /^\s*/.exec(s)[0]
-    if (indent) return `${indent}# ${cleaned.slice(indent.length)}`
-    // A column-0 line becomes a column-0 comment with no leading space: an indented comment
-    // would be swallowed by the previous key's block and dropped when that key is rewritten.
-    return keepText ? cleaned : '# ' + cleaned.replace(/^\s+/, '')
-  }
-  return extra.map((e) => {
-    if (typeof e === 'string') return fixLine(e, false)
-    // `keepText` applies to a real block header only: a keyless junk line that merely happens to
-    // be followed by an indented line is NOT a header, and letting it keep its text emits a bare
-    // indented line that the previous key swallows (same silent-loss family as before).
-    return { ...e, lines: e.lines.map((l, i) => fixLine(l, i === 0 && Boolean(e.key) && Boolean(e.nextIndented))) }
+  return extra.map((raw) => {
+    const e = typeof raw === 'string' ? { key: null, lines: [raw] } : raw
+    const keyed = Boolean(e.key)
+    const lines = e.lines.map((l) => {
+      const s = String(l)
+      const hits = s.match(YAML_BAD)
+      if (hits && stats) stats.cleaned += hits.length
+      const cleaned = hits ? s.replace(YAML_BAD, ' ') : s
+      if (!keyed) {
+        if (s.trim() === '') return cleaned
+        return ('# ' + cleaned.trim().replace(/^#\s*/, '')).trimEnd()
+      }
+      if (!hits) return s
+      const indent = /^\s*/.exec(s)[0]
+      return indent ? `${indent}# ${cleaned.slice(indent.length)}` : cleaned
+    })
+    return { ...e, lines }
   })
 }
 
@@ -1140,6 +1145,18 @@ export function lintWiki(dir, opts = {}) {
     }
     if (p.fm.type && !PAGE_TYPES.includes(String(p.fm.type))) {
       issues.push({ type: 'invalid-frontmatter', page: p.rel, message: `invalid type "${p.fm.type}" (use ${PAGE_TYPES.join('|')})` })
+    }
+    // Frontmatter the plugin tolerates but a generic YAML parser rejects: an indented line with no
+    // key above it. Reported once per page, because a writer may silently keep writing such a file.
+    const rawFm = /^---\r?\n([\s\S]*?)\r?\n---/.exec(p.raw)?.[1]
+    if (rawFm !== undefined) {
+      const fml = rawFm.split(/\r?\n/)
+      const orphanAt = fml.findIndex((l, i) => /^\s+\S/.test(l)
+        && !/^[A-Za-z_][\w-]*\s*:\s*(?:[|>][+-]?\d*)?\s*$/.test(fml[i - 1] ?? '')
+        && !/^\s+\S/.test(fml[i - 1] ?? ''))
+      if (orphanAt >= 0) {
+        issues.push({ type: 'unparseable-frontmatter', page: p.rel, message: `frontmatter line ${orphanAt + 1} is indented with no key above it — common YAML parsers reject this page; rewrite it to repair` })
+      }
     }
     if (p.fm.status === 'superseded') {
       if (!p.fm.superseded_by) {
