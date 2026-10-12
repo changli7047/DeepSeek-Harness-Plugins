@@ -418,19 +418,31 @@ export function rebuildIndex(dir) {
   return pages.length
 }
 
-// YAML cannot represent C0 control characters: refusing the write beats producing a page no
-// YAML reader can open.
-function assertYamlSafe(fm) {
+// YAML 1.2 c-printable excludes C0 (except tab/LF/CR), DEL, the whole C1 block, and
+// U+FFFE/U+FFFF, so a value containing one of these cannot be stored in frontmatter.
+const YAML_BAD = /[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F-\u0084\u0086-\u009F\uFFFE\uFFFF]/g
+
+// A value the caller supplied is rejected (loud); a value inherited from an older page is
+// cleaned instead, so a page written by a buggy build stays updatable instead of frozen.
+function cleanValue(s, key, strict) {
+  const bad = String(s).match(YAML_BAD)
+  if (!bad) return s
+  const code = 'U+' + bad[0].codePointAt(0).toString(16).toUpperCase().padStart(4, '0')
+  if (strict) throw new Error(`frontmatter field "${key}" contains control character ${code}, which YAML cannot store — remove it`)
+  return String(s).replace(YAML_BAD, '')
+}
+function sanitizeFm(fm, strict = new Set()) {
   for (const [k, v] of Object.entries(fm)) {
-    for (const val of Array.isArray(v) ? v : [v]) {
-      if (typeof val !== 'string') continue
-      const bad = /[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/.exec(val)
-      if (bad) {
-        const code = bad[0].codePointAt(0).toString(16).toUpperCase().padStart(4, '0')
-        throw new Error(`frontmatter field "${k}" contains control character U+${code}, which YAML cannot store — remove it`)
-      }
-    }
+    if (Array.isArray(v)) fm[k] = v.map((x) => (typeof x === 'string' ? cleanValue(x, k, strict.has(k)) : x))
+    else if (typeof v === 'string') fm[k] = cleanValue(v, k, strict.has(k))
   }
+  return fm
+}
+// Verbatim blocks are inherited text too: clean them rather than refusing to write the page.
+function sanitizeExtra(extra) {
+  return extra.map((e) => (typeof e === 'string'
+    ? e.replace(YAML_BAD, '')
+    : { ...e, lines: e.lines.map((l) => String(l).replace(YAML_BAD, '')) }))
 }
 
 export function initWorkspace(dir, opts = {}) {
@@ -617,8 +629,8 @@ export function writePage(dir, args) {
       retractReason: oneLine(args.retractReason ?? '(no reason given)'),
       last_updated: today(),
     }
-    assertYamlSafe(fmRetract)
-    writeFileSync(abs + '.tmp', serializePage(fmRetract, existing.body.trimEnd() + '\n', existing.extra, new Set(['retractReason'])))
+    sanitizeFm(fmRetract, new Set(['retractReason']))
+    writeFileSync(abs + '.tmp', serializePage(fmRetract, existing.body.trimEnd() + '\n', sanitizeExtra(existing.extra), new Set(['retractReason', 'status', 'last_updated'])))
     renameSync(abs + '.tmp', abs)
     if (args.index !== false) rebuildIndex(dir)
     appendLog(dir, `retract | wiki/${rel}${args.retractReason ? ' — ' + oneLine(args.retractReason) : ''}`)
@@ -688,14 +700,19 @@ export function writePage(dir, args) {
     if (!inside(path.join(dir, WIKI), oldRel)) throw new Error('supersedes path must stay inside wiki/: ' + oldRel)
     const oldAbs = path.join(dir, WIKI, oldRel)
     if (!existsSync(oldAbs)) throw new Error(`supersedes target not found: wiki/${oldRel}`)
-    supersede = { rel: oldRel, abs: oldAbs, page: parsePage(readFileSync(oldAbs, 'utf8')) }
+    const target = parsePage(readFileSync(oldAbs, 'utf8'))
+    // Clean the supersede target here — before this write touches the disk — so a page with a
+    // legacy control character cannot leave a half-finished replacement behind (validate
+    // everything first; see the atomicity note above).
+    supersede = { rel: oldRel, abs: oldAbs, page: { ...target, fm: sanitizeFm(target.fm), extra: sanitizeExtra(target.extra) } }
   }
 
   // Fields the caller passed explicitly must survive even when the old page kept them in an
   // unparsable block: the argument wins and the stale block is dropped.
-  const overridden = new Set(['title', 'type', 'tags', 'sources', 'trust', 'status', 'summary', 'supersedes', 'retractReason']
-    .filter((k) => args[k] !== undefined))
-  assertYamlSafe(fm)
+  const overridden = new Set(['title', 'type', 'tags', 'sources', 'trust', 'status', 'summary', 'supersedes', 'last_updated']
+    .filter((k) => args[k] !== undefined || k === 'last_updated'))
+  existing.extra = sanitizeExtra(existing.extra)
+  sanitizeFm(fm, overridden)
   const text = serializePage(fm, body.trim() + '\n', existing.extra, overridden)
   const tmp = abs + '.tmp'
   ensureDir(path.dirname(abs))
@@ -709,8 +726,7 @@ export function writePage(dir, args) {
   let superNote = ''
   if (supersede) {
     const oldFm = { ...supersede.page.fm, status: 'superseded', superseded_by: rel, last_updated: today() }
-    assertYamlSafe(oldFm)
-    writeFileSync(supersede.abs, serializePage(oldFm, supersede.page.body.trimEnd() + '\n', supersede.page.extra, new Set(['status', 'superseded_by'])))
+    writeFileSync(supersede.abs, serializePage(oldFm, supersede.page.body.trimEnd() + '\n', supersede.page.extra, new Set(['status', 'superseded_by', 'last_updated'])))
     appendLog(dir, `supersede | wiki/${rel} ← wiki/${supersede.rel}`)
     superNote = ` | superseded wiki/${supersede.rel}`
   }

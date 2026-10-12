@@ -437,6 +437,47 @@ try {
     /^title: "/m.test(commaRaw) && /^tags: \["/m.test(commaRaw) && parsePage(commaRaw).fm.title === ',x',
     commaPage + ' | ' + /^title: .*$/m.exec(commaRaw)[0])
 
+  // 第九轮：C1 拒绝、继承坏值清洗（坏页不冻结）、retractReason 不删块、retract 的 status 生效、supersede 不留半成品
+  const CTRL = /[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F-\u0084\u0086-\u009F\uFFFE\uFFFF]/
+  let c1Threw = ''
+  try { writePage(capWs, { path: 'concepts/C1.md', title: 'a\u0092b', body: '# x\n' }) } catch (e) { c1Threw = e.message }
+  ok('write: C1 controls and noncharacters are rejected with a named code point',
+    c1Threw.includes('U+0092'), c1Threw)
+
+  writeFileSync(path.join(concDir, 'HealMe.md'),
+    '---\ntitle: HealMe\ntype: concept\nsummary: bad\u0001summary\ntrust: low\n---\nbody\n')
+  let healThrew = ''
+  try { writePage(capWs, { path: 'concepts/HealMe.md', body: '# healed\n' }) } catch (e) { healThrew = e.message }
+  const healed = readFileSync(path.join(concDir, 'HealMe.md'), 'utf8')
+  ok('write: a page carrying an inherited control character stays updatable and gets cleaned',
+    healThrew === '' && !CTRL.test(healed) && parsePage(healed).fm.summary === 'badsummary',
+    healThrew || JSON.stringify(parsePage(healed).fm.summary))
+
+  writeFileSync(path.join(concDir, 'Retain.md'),
+    '---\ntitle: Retain\ntype: concept\nretractReason:\n  - old reason\n  - #c\ntrust: low\n---\nbody\n')
+  writePage(capWs, { path: 'concepts/Retain.md', retractReason: 'new reason', body: 'body\n' })
+  const retain = readFileSync(path.join(concDir, 'Retain.md'), 'utf8')
+  ok('write: passing retractReason without retract does not delete the block owning it',
+    retain.includes('- old reason') && !retain.includes('new reason'), retain.split('\n').slice(0, 8).join(' / '))
+
+  writeFileSync(path.join(concDir, 'Retracted.md'),
+    '---\ntitle: Retracted\ntype: concept\nstatus:\n  value: active\ntrust: low\n---\nbody\n')
+  writePage(capWs, { path: 'concepts/Retracted.md', retract: true, retractReason: 'r' })
+  const retractedPage = parsePage(readFileSync(path.join(concDir, 'Retracted.md'), 'utf8'))
+  ok('retract: a block-owned status is overridden so retraction really takes effect',
+    String(retractedPage.fm.status) === 'retracted' && dupKeys(readFileSync(path.join(concDir, 'Retracted.md'), 'utf8')).length === 0,
+    JSON.stringify(retractedPage.fm.status))
+
+  writeFileSync(path.join(concDir, 'BadOld.md'),
+    '---\ntitle: BadOld\ntype: concept\nsummary: bad\u0001summary\ntrust: low\n---\nold\n')
+  let supThrew = ''
+  try { writePage(capWs, { path: 'concepts/NewPage.md', title: 'NewPage', supersedes: 'concepts/BadOld.md', body: 'n\n' }) } catch (e) { supThrew = e.message }
+  const oldAfter = parsePage(readFileSync(path.join(concDir, 'BadOld.md'), 'utf8'))
+  ok('supersede: a legacy bad page is cleaned and marked instead of leaving a half-written state',
+    supThrew === '' && existsSync(path.join(concDir, 'NewPage.md')) && String(oldAfter.fm.status) === 'superseded'
+      && !CTRL.test(readFileSync(path.join(concDir, 'BadOld.md'), 'utf8')),
+    `${supThrew} new=${existsSync(path.join(concDir, 'NewPage.md'))} old=${JSON.stringify(oldAfter.fm.status)}`)
+
   const statusTool = TOOLS.find((t) => t.name === 'archivist_status')
   let unknownThrew = false
   try { runTool(statusTool, { workspace: ws, bogusUnknownParam: 42 }) } catch { unknownThrew = true }
