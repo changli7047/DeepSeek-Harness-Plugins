@@ -72,9 +72,10 @@ const stamp = () => {
 }
 const sha16 = (buf) => createHash('sha256').update(buf).digest('hex').slice(0, 16)
 const fwd = (p) => p.replace(/\\/g, '/')
-// Frontmatter scalars live on one line each: an embedded newline would split the record
-// and the trailing part would be dropped on re-parse.
-const oneLine = (v) => String(v).replace(/\s*[\r\n]+\s*/g, ' ').trim()
+// Frontmatter scalars live on one line each: an embedded line break would split the record
+// and the trailing part would be dropped on re-parse. JS "." does not match U+2028/U+2029,
+// so they are folded here explicitly along with NEL.
+const oneLine = (v) => String(v).replace(/\s*[\r\n\u2028\u2029\u0085]+\s*/g, ' ').trim()
 
 function walkFiles(dir) {
   const out = []
@@ -169,21 +170,47 @@ function splitItems(inner) {
   return out.map((s) => s.trim()).filter(Boolean)
 }
 
+// A block introduced by a bare "key:" line is parsed back into a value when its shape is
+// simple (flow array, scalar list, one plain scalar); anything else is kept verbatim by the
+// caller. Returning undefined means "keep the block intact".
+function parseBlock(kv, cont) {
+  const inline = kv[2].trim()
+  const joined = [inline, ...cont.map((l) => l.trim())].filter(Boolean).join(' ')
+  if (joined.startsWith('[') && joined.endsWith(']')) return splitItems(joined.slice(1, -1))
+  const items = cont.filter((l) => l.trim() !== '')
+  if (inline === '' && items.length && items.every((l) => /^\s*-\s+\S/.test(l) && !/^\s*-\s+\S+:(\s|$)/.test(l))) {
+    return items.map((l) => unquote(l.replace(/^\s*-\s+/, '').trim()))
+  }
+  if (inline === '' && cont.length === 1 && cont[0].trim() && !/^\S+:(\s|$)/.test(cont[0].trim())) {
+    return unquote(cont[0].trim())
+  }
+  return undefined
+}
+
 export function parsePage(text) {
   const m = /^---\r?\n([\s\S]*?)\r?\n---\r?\n?/.exec(text)
   if (!m) return { fm: {}, extra: [], body: text, raw: text }
   const fm = {}
-  // Lines this parser does not understand — block lists, nested maps, block scalars, and
-  // keys outside [A-Za-z_][\w-] — are kept verbatim so a rewrite cannot delete them.
+  // Lines this parser does not understand — nested maps, block scalars, keys outside
+  // [A-Za-z_][\w-] — are kept verbatim (with their key name) so a rewrite cannot delete
+  // them and cannot emit the same key twice.
   const extra = []
   const lines = m[1].split(/\r?\n/)
+  const indentAt = (n) => n >= 0 && n < lines.length && /^\s+\S/.test(lines[n])
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i]
     const kv = /^([A-Za-z_][\w-]*)\s*:\s*(.*)$/.exec(line)
-    // A line whose next line is indented starts a block (list, map, block scalar): keep the
-    // whole block verbatim rather than splitting the key from its content.
-    const startsBlock = i + 1 < lines.length && /^\s+\S/.test(lines[i + 1])
-    if (!kv || startsBlock) { extra.push(line); continue }
+    if (kv && indentAt(i + 1)) {
+      let j = i + 1
+      while (j < lines.length && (indentAt(j) || (lines[j].trim() === '' && indentAt(j + 1)))) j++
+      const cont = lines.slice(i + 1, j)
+      const value = parseBlock(kv, cont)
+      if (value === undefined) extra.push({ key: kv[1], lines: [line, ...cont] })
+      else fm[kv[1]] = value
+      i = j - 1
+      continue
+    }
+    if (!kv) { extra.push({ key: null, lines: [line] }); continue }
     let v = kv[2].trim()
     if (v.startsWith('[') && v.endsWith(']')) v = splitItems(v.slice(1, -1))
     else v = unquote(v)
@@ -193,13 +220,16 @@ export function parsePage(text) {
 }
 
 function serializePage(fm, body, extra = []) {
+  const blocks = extra.map((e) => (typeof e === 'string' ? { key: null, lines: [e] } : e))
+  // A verbatim block owns its key: emitting the fm value as well would duplicate the key.
+  const claimed = new Set(blocks.map((b) => b.key).filter(Boolean))
   const lines = ['---']
   for (const [k, v] of Object.entries(fm)) {
-    if (v === undefined || v === null) continue
+    if (v === undefined || v === null || claimed.has(k)) continue
     if (Array.isArray(v)) lines.push(`${k}: [${v.map(quoteItem).join(', ')}]`)
     else lines.push(`${k}: ${quoteScalar(v)}`)
   }
-  for (const line of extra) lines.push(line)
+  for (const b of blocks) for (const line of b.lines) lines.push(line)
   lines.push('---', '')
   return lines.join('\n') + body.replace(/^\s*\n/, '')
 }

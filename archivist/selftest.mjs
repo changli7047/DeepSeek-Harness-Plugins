@@ -346,18 +346,54 @@ try {
       && quoted.fm.tags[1] === 'he said "hi"' && quoted.fm.tags[2] === '"' && quoted.fm.tags[3] === 'plain',
     JSON.stringify(quoted.fm.tags))
 
+  const dupKeys = (text) => {
+    const f = /^---\r?\n([\s\S]*?)\r?\n---/.exec(text)
+    const seen = []
+    for (const line of (f ? f[1] : '').split(/\r?\n/)) {
+      const k = /^([A-Za-z_][\w-]*)\s*:/.exec(line)
+      if (k) seen.push(k[1])
+    }
+    return seen.filter((k, i) => seen.indexOf(k) !== i)
+  }
+
   writeFileSync(path.join(concDir, 'Blocky.md'),
     '---\ntitle: Blocky\ntype: concept\naliases_block:\n  - one\n  - two\nnested:\n  key: value\nnotes: |\n  line a\n  line b\na.b: dotted\n中文键: 值\n2026_plan: year\ntrust: low\n---\nbody\n')
   writePage(capWs, { path: 'concepts/Blocky.md', body: '# Blocky updated\n' })
   const blocky = readFileSync(path.join(concDir, 'Blocky.md'), 'utf8')
+  const blockyPage = parsePage(blocky)
   ok('frontmatter: block lists, nested maps, block scalars and odd keys survive an update',
-    ['aliases_block:\n  - one', 'nested:\n  key: value', 'notes: |\n  line a', 'a.b: dotted', '中文键: 值', '2026_plan: year'].every((s) => blocky.includes(s)),
+    dupKeys(blocky).length === 0
+      && Array.isArray(blockyPage.fm.aliases_block) && blockyPage.fm.aliases_block.join(',') === 'one,two'
+      && ['nested:\n  key: value', 'notes: |\n  line a', 'a.b: dotted', '中文键: 值', '2026_plan: year'].every((s) => blocky.includes(s)),
     blocky.split('\n').slice(0, 16).join(' / '))
 
   writeFileSync(path.join(concDir, 'Legacy.md'), '---\ntitle: Legacy2\ntype: concept\ntrust: HIGH\nstatus: Draft\n---\nbody\n')
   let legacyOk = true
   try { writePage(capWs, { path: 'concepts/Legacy.md', body: '# Legacy2 updated\n' }) } catch { legacyOk = false }
   ok('write: a legacy invalid trust/status does not block a body-only update', legacyOk)
+
+  // 第六轮：裸 "key:" + 缩进块不得造成重复键；U+2028/2029 不得撕裂 frontmatter
+  writeFileSync(path.join(concDir, 'Bare.md'),
+    '---\ntitle:\n  My Real Title\ntype: concept\ntags:\n  - alpha\n  - beta\ntrust: low\n---\nbody\n')
+  writePage(capWs, { path: 'concepts/Bare.md', body: 'body2\n' })
+  const bare = readFileSync(path.join(concDir, 'Bare.md'), 'utf8')
+  const barePage = parsePage(bare)
+  ok('frontmatter: a bare "key:" block is parsed into the value, not duplicated',
+    dupKeys(bare).length === 0 && barePage.fm.title === 'My Real Title'
+      && Array.isArray(barePage.fm.tags) && barePage.fm.tags.join(',') === 'alpha,beta',
+    `dupes=${JSON.stringify(dupKeys(bare))} title=${JSON.stringify(barePage.fm.title)} tags=${JSON.stringify(barePage.fm.tags)}`)
+
+  writeFileSync(path.join(concDir, 'Nested.md'),
+    '---\ntitle: Nested\ntype: concept\ntags:\n  nest: value\ntrust: low\n---\nbody\n')
+  writePage(capWs, { path: 'concepts/Nested.md', body: 'body2\n' })
+  const nested = readFileSync(path.join(concDir, 'Nested.md'), 'utf8')
+  ok('frontmatter: an unparseable block keeps its key and is never duplicated',
+    dupKeys(nested).length === 0 && nested.includes('tags:\n  nest: value'), `dupes=${JSON.stringify(dupKeys(nested))}`)
+
+  writePage(capWs, { path: 'concepts/Sep.md', title: 'Sep', summary: 'a\u2028b\u2029c', body: '# Sep\n' })
+  const sep = readFileSync(path.join(concDir, 'Sep.md'), 'utf8')
+  ok('frontmatter: line separators are folded instead of splitting the record',
+    dupKeys(sep).length === 0 && parsePage(sep).fm.summary === 'a b c', JSON.stringify(parsePage(sep).fm.summary))
 
   const statusTool = TOOLS.find((t) => t.name === 'archivist_status')
   let unknownThrew = false
