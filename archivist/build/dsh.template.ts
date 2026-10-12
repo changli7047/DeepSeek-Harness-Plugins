@@ -53,7 +53,7 @@ export function apply(ctx: Context): void {
       timeoutMs: 30000,
       isConcurrencySafe: () => false,
       async execute(args) {
-        return String(tool.run((args ?? {}) as Record<string, unknown>))
+        return String(runTool(tool, (args ?? {}) as Record<string, unknown>))
       },
     }))
   }

@@ -24,6 +24,7 @@ import { fileURLToPath } from 'node:url'
 
 export const PAGE_DIRS = ['sources', 'entities', 'concepts', 'syntheses']
 const TYPE_BY_DIR = { sources: 'source', entities: 'entity', concepts: 'concept', syntheses: 'synthesis' }
+const PAGE_TYPES = ['source', 'entity', 'concept', 'synthesis']
 const WIKI = 'wiki'
 const SCHEMA_FILE = 'AGENTS.md'
 const MANIFEST = path.posix.join(WIKI, '.ingest-manifest.json')
@@ -35,6 +36,8 @@ const READ_CHAR_CAP = 120000
 const EXCLUDE_RE = /(^|\/)(\.backups|\.git|node_modules)(\/|$)/
 const RAW_EXTS = /\.(md|txt|json|csv|ya?ml)$/i
 const RAW_SIZE_CAP = 2 * 1024 * 1024
+// Files listed before the scan list is truncated; the counts stay exact either way.
+const SCAN_ROW_CAP = 60
 
 // ---------------------------------------------------------------- helpers
 
@@ -49,6 +52,9 @@ const stamp = () => {
 }
 const sha16 = (buf) => createHash('sha256').update(buf).digest('hex').slice(0, 16)
 const fwd = (p) => p.replace(/\\/g, '/')
+// Frontmatter scalars live on one line each: an embedded newline would split the record
+// and the trailing part would be dropped on re-parse.
+const oneLine = (v) => String(v).replace(/\s*[\r\n]+\s*/g, ' ').trim()
 
 function walkFiles(dir) {
   const out = []
@@ -99,6 +105,29 @@ function inside(root, rel) {
 
 // ---------------------------------------------------------------- frontmatter
 
+// A scalar shaped like "[...]" parses back as a list, and a surrounding quote is stripped,
+// so serializePage must quote those; list items are quoted when they carry a comma or a
+// bracket, and splitItems keeps a quoted comma inside one item instead of splitting it.
+const quoteScalar = (v) => {
+  const s = oneLine(v)
+  return /^\[.*\]$/.test(s) || /^["']|["']$/.test(s) ? JSON.stringify(s) : s
+}
+const quoteItem = (v) => {
+  const s = oneLine(v)
+  return /[,\[\]"']/.test(s) ? JSON.stringify(s) : s
+}
+function splitItems(inner) {
+  const out = []
+  let cur = '', quoted = false
+  for (const ch of inner) {
+    if (ch === '"') { quoted = !quoted; continue }
+    if (ch === ',' && !quoted) { out.push(cur); cur = ''; continue }
+    cur += ch
+  }
+  out.push(cur)
+  return out.map((s) => s.trim()).filter(Boolean)
+}
+
 export function parsePage(text) {
   const m = /^---\r?\n([\s\S]*?)\r?\n---\r?\n?/.exec(text)
   if (!m) return { fm: {}, body: text, raw: text }
@@ -107,11 +136,8 @@ export function parsePage(text) {
     const kv = /^([A-Za-z_][\w-]*)\s*:\s*(.*)$/.exec(line)
     if (!kv) continue
     let v = kv[2].trim()
-    if (v.startsWith('[') && v.endsWith(']')) {
-      v = v.slice(1, -1).split(',').map((s) => s.trim().replace(/^["']|["']$/g, '')).filter(Boolean)
-    } else {
-      v = v.replace(/^["']|["']$/g, '')
-    }
+    if (v.startsWith('[') && v.endsWith(']')) v = splitItems(v.slice(1, -1))
+    else v = v.replace(/^["']|["']$/g, '')
     fm[kv[1]] = v
   }
   return { fm, body: text.slice(m[0].length), raw: text }
@@ -121,8 +147,8 @@ function serializePage(fm, body) {
   const lines = ['---']
   for (const [k, v] of Object.entries(fm)) {
     if (v === undefined || v === null) continue
-    if (Array.isArray(v)) lines.push(`${k}: [${v.join(', ')}]`)
-    else lines.push(`${k}: ${v}`)
+    if (Array.isArray(v)) lines.push(`${k}: [${v.map(quoteItem).join(', ')}]`)
+    else lines.push(`${k}: ${quoteScalar(v)}`)
   }
   lines.push('---', '')
   return lines.join('\n') + body.replace(/^\s*\n/, '')
@@ -244,6 +270,7 @@ last_updated: YYYY-MM-DD（由 archivist_write 自动填）
 - 修正用替代/撤回记录，不覆盖历史
 - 穷尽/计数问题用 archivist_scan 的精确计数回答并声明覆盖范围；不要用 top-K 结果冒充全库
 - 页面保持原子化（一页一主题），标题清晰，wikilink 至少连 2 个其他页
+- **导航页/总览页只放链接，不得把各条目的描述正文抄进去**：一页装 N 个条目的摘要会变成"吸铁石"——实测 84 条语料下，这样的总览页霸占 81/84 条内容查询的第 1 名，真正该命中的页被挤到第 2（Top-1 命中率 23% → 去掉描述正文后 77%）。导航交给 \`index.md\`（它由插件维护、不参与检索）
 `
 
 const INDEX_HEADER = `# Wiki Index
@@ -261,24 +288,47 @@ function ensure(file, content) {
 }
 function ensureDir(p) { mkdirSync(p, { recursive: true }) }
 
+// index.md links are parsed back by lintWiki. Escape "%", "(", ")", and every whitespace
+// code unit to a FIXED-width escape: fixed width is what makes the encoding injective and
+// exactly invertible (a variable-width form let "%20" + hex digits collide, and left
+// non-U+0020 whitespace undecodable). Legacy two-character escapes stay decodable so an
+// index written by an older build still parses; rebuilding normalises it.
+const encodeHref = (rel) => String(rel).replace(/[%()\s]/g, (c) => '%' + c.charCodeAt(0).toString(16).toUpperCase().padStart(4, '0'))
+const decodeHref = (h) => String(h).replace(/%(?:[0-9a-f]{4}|25|28|29|20)/gi, (m) => {
+  const code = m.length === 5 ? m.slice(1) : m.slice(1).padStart(4, '0')
+  return String.fromCharCode(parseInt(code, 16))
+})
+const indexLine = (p) => `- [${String(p.title).replace(/\[/g, '［').replace(/\]/g, '］')}](${encodeHref(p.rel)})${p.fm.summary ? ' — ' + p.fm.summary : ''}`
+
 export function rebuildIndex(dir) {
   const pages = listPages(dir)
   const byDir = Object.fromEntries(PAGE_DIRS.map((d) => [d, []]))
+  const other = []
   let overview = null
   for (const p of pages) {
     const top = p.rel.includes('/') ? p.rel.split('/')[0] : ''
     if (p.rel === 'overview.md') { overview = p; continue }
+    // writePage accepts wiki-root pages ("or wiki root"); list them instead of
+    // dropping them, or index coverage can never match what the workspace holds.
     if (byDir[top]) byDir[top].push(p)
+    else other.push(p)
   }
   const lines = [INDEX_HEADER.trim(), '']
   if (overview) {
-    lines.push('## Overview', `- [${overview.title}](${overview.rel})${overview.fm.summary ? ' — ' + overview.fm.summary : ''}`, '')
+    lines.push('## Overview', indexLine(overview), '')
   }
   const sectionTitles = { sources: 'Sources', entities: 'Entities', concepts: 'Concepts', syntheses: 'Syntheses' }
   for (const d of PAGE_DIRS) {
     lines.push(`## ${sectionTitles[d]}`)
     for (const p of byDir[d].sort((a, b) => a.rel.localeCompare(b.rel))) {
-      lines.push(`- [${p.title}](${p.rel})${p.fm.summary ? ' — ' + p.fm.summary : ''}`)
+      lines.push(indexLine(p))
+    }
+    lines.push('')
+  }
+  if (other.length) {
+    lines.push('## Other（wiki 根目录 / 未归类）')
+    for (const p of other.sort((a, b) => a.rel.localeCompare(b.rel))) {
+      lines.push(indexLine(p))
     }
     lines.push('')
   }
@@ -437,7 +487,9 @@ export function writePage(dir, args) {
   let rel = pageRel ? fwd(String(pageRel)) : ''
   if (!rel) {
     if (!args.title) throw new Error('provide path (e.g. "concepts/Foo.md") or title')
-    const top = String(args.dir || args.type || 'concepts')
+    // `dir` picks the folder; `type` is frontmatter only (using it as a folder name
+    // produced "<type>/<title>.md", which no PAGE_DIRS ever matches).
+    const top = String(args.dir || 'concepts')
     rel = `${top}/${slugify(String(args.title))}.md`
   }
   // Normalize every path segment to the slug convention so titles and paths stay consistent.
@@ -464,16 +516,21 @@ export function writePage(dir, args) {
       title: existing.fm.title || path.basename(rel, '.md'),
       type: existing.fm.type || (parts.length === 2 ? TYPE_BY_DIR[parts[0]] : 'synthesis'),
       status: 'retracted',
-      retractReason: String(args.retractReason ?? '(no reason given)'),
+      retractReason: oneLine(args.retractReason ?? '(no reason given)'),
       last_updated: today(),
     }
     writeFileSync(abs + '.tmp', serializePage(fmRetract, existing.body.trimEnd() + '\n'))
     renameSync(abs + '.tmp', abs)
     if (args.index !== false) rebuildIndex(dir)
-    appendLog(dir, `retract | wiki/${rel}${args.retractReason ? ' — ' + String(args.retractReason) : ''}`)
-    return `retracted wiki/${rel}${args.retractReason ? ' (' + String(args.retractReason) + ')' : ''}`
+    appendLog(dir, `retract | wiki/${rel}${args.retractReason ? ' — ' + oneLine(args.retractReason) : ''}`)
+    return `retracted wiki/${rel}${args.retractReason ? ' (' + oneLine(args.retractReason) + ')' : ''}`
   }
 
+  // Validate only what the caller supplied: a page written before this check may hold a
+  // legacy type, and an update that does not pass `type` must still be able to fix it.
+  if (args.type !== undefined && !PAGE_TYPES.includes(String(args.type))) {
+    throw new Error(`invalid type "${args.type}" — use ${PAGE_TYPES.join(' | ')}`)
+  }
   const dirType = parts.length === 2 ? TYPE_BY_DIR[parts[0]] : 'synthesis'
   const trust = args.trust !== undefined
     ? String(args.trust)
@@ -486,19 +543,23 @@ export function writePage(dir, args) {
   const supersedes = args.supersedes !== undefined
     ? fwd(String(args.supersedes)).replace(/^wiki\//, '')
     : (existing.fm.supersedes || undefined)
+  // Start from the existing record so keys this build does not know about (aliases,
+  // reviewed, source_url, …) survive an update instead of being deleted silently.
   const fm = {
-    title: args.title || existing.fm.title || path.basename(rel, '.md'),
+    ...existing.fm,
+    title: oneLine(args.title || existing.fm.title || path.basename(rel, '.md')),
     type: args.type || existing.fm.type || dirType,
     tags: args.tags || existing.fm.tags || [],
     sources: args.sources || existing.fm.sources || [],
-    ...(args.summary || existing.fm.summary ? { summary: args.summary || existing.fm.summary } : {}),
+    ...(args.summary || existing.fm.summary ? { summary: oneLine(args.summary || existing.fm.summary) } : {}),
     trust,
-    ...(status !== 'active' ? { status } : {}),
     ...(supersedes ? { supersedes } : {}),
     ...(existing.fm.superseded_by ? { superseded_by: existing.fm.superseded_by } : {}),
     ...(existing.fm.retractReason ? { retractReason: existing.fm.retractReason } : {}),
     last_updated: today(),
   }
+  // Only an explicit status may change it; "active" means "no status line in the record".
+  if (args.status !== undefined) { if (status === 'active') delete fm.status; else fm.status = status }
   if (typeof fm.title !== 'string' || !fm.title.trim()) throw new Error('page title is required')
   if (!body.trim()) body = existing.body.trim() ? existing.body : `# ${fm.title}\n`
 
@@ -797,13 +858,19 @@ export function scanCorpus(dir, query, scope = 'all') {
   if (!rows.length) {
     return `${head}\n覆盖声明：${coverage}未命中不等于不存在——检查拼写、别名或其他工作区。`
   }
-  const shown = rows.slice(0, 60)
+  const truncated = rows.length > SCAN_ROW_CAP
+  const shown = rows.slice(0, SCAN_ROW_CAP)
   const list = shown.map((r) => `- ${r.label} × ${r.count}`).join('\n')
-  const more = rows.length > 60 ? `\n…(另有 ${rows.length - 60} 个命中文件未显示；计数不受影响)` : ''
-  const truncNote = rows.length > 60
-    ? '（清单截断，计数与文件数准确）'
-    : (skipped ? '（命中文件已全列，但未覆盖跳过文件）' : '（完整清单）')
-  return `${head}\n${list}${more}\n覆盖声明：以上为全部命中文件${truncNote}。${coverage}穷尽/统计类问题以此计数为准，不要用 top-K 检索结果代替。`
+  const more = truncated ? `\n…(另有 ${rows.length - SCAN_ROW_CAP} 个命中文件未显示)` : ''
+  // The claim must describe this list *and* the files it left out: neither "全部命中文件"
+  // nor an unqualified "计数准确" may survive dropped rows or skipped files.
+  const scopeNote = skipped ? `（只统计已扫描的文件；另有 ${skipped} 个文件未扫描，其中可能仍有命中）` : ''
+  const listClaim = truncated
+    ? `清单截断：上表仅列出命中次数最多的 ${SCAN_ROW_CAP} 个文件，命中文件共 ${rows.length} 个${skipped ? scopeNote : '；出现次数与命中文件数均准确'}`
+    : (skipped
+        ? `以上为已扫描文件中的全部命中${scopeNote}`
+        : '以上为全部命中文件（完整清单）')
+  return `${head}\n${list}${more}\n覆盖声明：${listClaim}。${coverage}穷尽/统计类问题以此计数为准，不要用 top-K 检索结果代替。`
 }
 
 // ---------------------------------------------------------------- lint
@@ -852,7 +919,10 @@ export function lintWiki(dir, opts = {}) {
   let indexText = ''
   try { indexText = readFileSync(path.join(dir, WIKI, 'index.md'), 'utf8') } catch { }
   const hrefs = new Set()
-  for (const m of indexText.matchAll(/\]\(([^)]+)\)/g)) hrefs.add(fwd(m[1]).replace(/^\.\//, '').replace(/\.md$/i, '').toLowerCase())
+  for (const line of indexText.split('\n')) {
+    const m = /^[-*+]\s+\[[^\]]*\]\(([^()]*)\)/.exec(line.trim())
+    if (m) hrefs.add(decodeHref(fwd(m[1])).replace(/^\.\//, '').replace(/\.md$/i, '').toLowerCase())
+  }
   for (const p of pages) {
     if (!hrefs.has(p.rel.replace(/\.md$/i, '').toLowerCase())) issues.push({ type: 'index-missing', page: p.rel, message: 'page missing from index.md (run archivist_index)' })
   }
@@ -869,6 +939,9 @@ export function lintWiki(dir, opts = {}) {
     }
     if (p.fm.status && !['active', 'superseded', 'retracted'].includes(String(p.fm.status))) {
       issues.push({ type: 'invalid-frontmatter', page: p.rel, message: `invalid status "${p.fm.status}" (use active|superseded|retracted)` })
+    }
+    if (p.fm.type && !PAGE_TYPES.includes(String(p.fm.type))) {
+      issues.push({ type: 'invalid-frontmatter', page: p.rel, message: `invalid type "${p.fm.type}" (use ${PAGE_TYPES.join('|')})` })
     }
     if (p.fm.status === 'superseded') {
       if (!p.fm.superseded_by) {
@@ -1033,6 +1106,11 @@ export function commitWorkspace(dir, message) {
   if (git.error && git.error.code === 'ENOENT') {
     throw new Error('git is not installed — optional feature. Use archivist_backup for no-git snapshots.')
   }
+  if (git.status === null) {
+    // The spawn itself failed (e.g. a sandbox that forbids piped child processes): the
+    // repository state is unknown, so never claim this directory is not a repository.
+    throw new Error(`git could not be run here (${git.error?.code ?? 'spawn failed'}) — cannot tell whether ${dir} is a git repository. Run git where child processes are permitted, or use archivist_backup instead.`)
+  }
   if (git.status !== 0 || !/true/.test(git.stdout)) {
     throw new Error(`${dir} is not a git repository — run "git init" there first, or use archivist_backup instead`)
   }
@@ -1152,8 +1230,10 @@ export const TOOLS = [
       type: 'object',
       properties: {
         path: { type: 'string', description: 'Wiki-relative page path, e.g. "concepts/Foo.md". Optional when title + dir are given.' },
+        rel: { type: 'string', description: 'Alias of path (kept for scripts and older callers).' },
         title: { type: 'string', description: 'Page title (used to derive the filename when path is omitted).' },
         dir: { type: 'string', enum: ['sources', 'entities', 'concepts', 'syntheses'], description: 'Target folder (default: concepts) when path is omitted.' },
+        type: { type: 'string', enum: ['source', 'entity', 'concept', 'synthesis'], description: 'Frontmatter type; defaults from the target folder (wiki-root pages default to synthesis).' },
         body: { type: 'string', description: 'Markdown body; use [[Page Title]] wikilinks for cross-references.' },
         tags: { type: 'array', items: { type: 'string' }, description: 'Tags.' },
         sources: { type: 'array', items: { type: 'string' }, description: 'Raw source references backing this page.' },
@@ -1165,6 +1245,7 @@ export const TOOLS = [
         retractReason: { type: 'string', description: 'Reason recorded when retract is true.' },
         sourceFile: { type: 'string', description: 'Raw source path (e.g. "raw/foo.md") to mark ingested by this page.' },
         log: { type: 'string', description: 'Append this log entry, e.g. "ingest | Title".' },
+        index: { type: 'boolean', description: 'Set false to skip the automatic index rebuild (bulk edits); run archivist_index once afterwards.' },
         workspace: WS_PROP,
       },
       additionalProperties: false,
@@ -1242,6 +1323,27 @@ export const TOOLS = [
   },
 ]
 
+/**
+ * Run one tool after rejecting undeclared arguments.
+ *
+ * dsh compiles this table's `properties` into an implicit OPEN object root, so the
+ * parameters root cannot express `additionalProperties: false`; and a direct `run()`
+ * call bypasses the raw schema the other hosts receive. Without this check a
+ * misspelled key is dropped silently while the operation still reports success.
+ * @param {{name: string, schema: {properties?: Record<string, unknown>}, run: (a: Record<string, unknown>) => string}} tool - Entry from {@link TOOLS}.
+ * @param {Record<string, unknown>} args - Arguments supplied by the host or the CLI.
+ * @returns {string} The tool result.
+ */
+export function runTool(tool, args) {
+  const given = Object.keys(args ?? {})
+  const declared = Object.keys(tool.schema?.properties ?? {})
+  const unknown = given.filter((k) => !declared.includes(k))
+  if (unknown.length) {
+    throw new Error(`${tool.name}: unknown parameter(s) ${unknown.map((k) => `"${k}"`).join(', ')} — declared: ${declared.join(', ')}`)
+  }
+  return tool.run(args ?? {})
+}
+
 // ---------------------------------------------------------------- CLI (host-independent self-test)
 
 const isMain = process.argv[1] && path.resolve(process.argv[1]) === path.resolve(fileURLToPath(import.meta.url))
@@ -1271,7 +1373,7 @@ if (isMain) {
     }
   }
   try {
-    const out = tool.run(args)
+    const out = runTool(tool, args)
     console.log(out)
   } catch (e) {
     console.error('error: ' + e.message)

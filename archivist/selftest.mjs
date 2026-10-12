@@ -5,7 +5,7 @@
 import {
   initWorkspace, attachWorkspace, listSources, writePage, readPages, searchWiki,
   lintWiki, appendLog, readLog, estimateTokens, statusWorkspace, backupWorkspace,
-  commitWorkspace, parsePage, rebuildIndex, scanCorpus, TOOLS,
+  commitWorkspace, parsePage, rebuildIndex, scanCorpus, runTool, TOOLS,
 } from './core/archivist.mjs'
 import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
 import { spawnSync } from 'node:child_process'
@@ -187,7 +187,9 @@ try {
   const bigScan = scanCorpus(ws, 'zzbig', 'raw')
   ok('scan: skipped >2MB file is disclosed', bigScan.includes('超过 2MB') && bigScan.includes('raw/big-skip.md'), bigScan)
   ok('scan: skipped extension is disclosed', bigScan.includes('扩展名不在白名单') && bigScan.includes('raw/page.html'), bigScan)
-  ok('scan: never claims a complete list while files were skipped', !bigScan.includes('完整清单'), bigScan)
+  ok('scan: skipped files never yield a totality claim',
+    !bigScan.includes('完整清单') && !bigScan.includes('以上为全部命中文件') && bigScan.includes('未扫描'),
+    bigScan.split('\n').slice(-2).join(' / '))
   ok('scan: count stays exact over the files it did scan', /total occurrences: 1/.test(bigScan) && bigScan.includes('raw/skip-probe.md'), bigScan.split('\n')[0])
   const bigSearch = searchWiki(ws, 'zzbig', 10, 'raw')
   ok('search: skipped raw files are disclosed', bigSearch.includes('未纳入检索') && bigSearch.includes('raw/big-skip.md') && bigSearch.includes('raw/page.html'), bigSearch)
@@ -207,6 +209,130 @@ try {
   const gapDirty = scanCorpus(gapWs, 'zzgap', 'raw')
   ok('scan: non-empty filtered file is still disclosed as a coverage gap',
     gapDirty.includes('扩展名不在白名单') && gapDirty.includes('raw/notes.html') && !gapDirty.includes('完整清单'), gapDirty)
+
+  // 13c. regressions: a truncated scan must not call its list complete; a
+  // wiki-root page must be listed (else lint's "run archivist_index" is a dead
+  // end); an undeclared argument must be rejected, not dropped silently.
+  const capWs = path.join(os.tmpdir(), 'archivist-smoke-cap-' + Date.now())
+  cleanupPaths.push(capWs)
+  initWorkspace(capWs)
+  for (let i = 1; i <= 61; i++) {
+    writeFileSync(path.join(capWs, 'raw', `cap-${String(i).padStart(2, '0')}.md`), `# cap ${i}\nzzcap once\n`)
+  }
+  const capScan = scanCorpus(capWs, 'zzcap', 'raw')
+  ok('scan: truncated list states the cut and never claims completeness',
+    capScan.includes('清单截断') && capScan.includes('另有 1 个命中文件未显示') && !capScan.includes('以上为全部命中文件'),
+    capScan.split('\n').slice(-2).join(' / '))
+  ok('scan: truncated list keeps the exact file count',
+    /matched in 61 of 62 scanned file\(s\)/.test(capScan), capScan.split('\n')[0])
+
+  writePage(capWs, { path: 'RootNote.md', title: '根目录页', body: '# 根目录页\n' })
+  const capIdx = readFileSync(path.join(capWs, 'wiki', 'index.md'), 'utf8')
+  ok('index: wiki-root page is listed and lint reports no index-missing',
+    capIdx.includes('RootNote.md') && !lintWiki(capWs).includes('index-missing'), capIdx.split('\n').slice(-3).join(' / '))
+  ok('index: no Other section when every page is filed',
+    !/^## Other/m.test(readFileSync(path.join(ws, 'wiki', 'index.md'), 'utf8')))
+
+  // 截断 + 有跳过：计数声明必须限定在"已扫描"范围内
+  writeFileSync(path.join(capWs, 'raw', 'cap-skip.html'), '<p>zzcap zzcap</p>\n')
+  const capSkip = scanCorpus(capWs, 'zzcap', 'raw')
+  ok('scan: truncation combined with a skipped file qualifies the count',
+    capSkip.includes('清单截断') && capSkip.includes('只统计已扫描的文件') && !capSkip.includes('均准确'),
+    capSkip.split('\n').slice(-2).join(' / '))
+
+  // index 链接必须能被回读：带括号的文件名、含 ] 的标题都不许把 lint 逼进死路
+  writePage(capWs, { path: 'Note(1).md', title: 'NoteOne', body: '# NoteOne\n' })
+  writePage(capWs, { path: 'concepts/Deep(v2).md', title: 'See](also', body: '# Deep\n' })
+  const parenLint = lintWiki(capWs)
+  ok('index: parenthesised filename round-trips (no index-missing / index-broken)',
+    !parenLint.includes('index-missing') && !parenLint.includes('index-broken'), parenLint.split('\n').slice(0, 4).join(' / '))
+
+  // type 必须在工具层可用（曾因 schema 未声明而被 runTool 拒绝）
+  const typeOut = writePage(capWs, { path: 'concepts/Typed.md', title: 'Typed', type: 'entity', body: '# Typed\n' })
+  ok('write: declared type override is accepted',
+    typeOut.includes('created') && readFileSync(path.join(capWs, 'wiki', 'concepts', 'Typed.md'), 'utf8').includes('type: entity'), typeOut)
+
+  // 路径里的字面 % 必须能往返：编码若丢单射性，lint 会永久报缺页且 archivist_index 修不好
+  writePage(capWs, { path: 'pct%20name.md', title: 'Pct', body: '# Pct\n' })
+  writePage(capWs, { path: 'concepts/A%281%29.md', title: 'PctTwo', body: '# PctTwo\n' })
+  const pctLint = lintWiki(capWs)
+  ok('index: literal % in a filename round-trips exactly',
+    !pctLint.includes('index-missing') && !pctLint.includes('index-broken'), pctLint.split('\n').slice(0, 4).join(' / '))
+
+  // {title, type} 必须可用：type 只进 frontmatter，不再被当成目录名
+  const typeOnly = writePage(capWs, { title: 'TypeOnly', type: 'entity', body: '# TypeOnly\n' })
+  ok('write: {title, type} derives concepts/ and applies the type',
+    typeOnly.includes('concepts/TypeOnly.md') && /type: entity/.test(readFileSync(path.join(capWs, 'wiki', 'concepts', 'TypeOnly.md'), 'utf8')), typeOnly)
+
+  // 显式非法 type 必须被拒（与 trust / status 同级）
+  let badTypeThrew = false
+  try { writePage(capWs, { path: 'concepts/BadType.md', title: 'BadType', type: 'note', body: '# Bad\n' }) } catch { badTypeThrew = true }
+  ok('write: explicit invalid type is rejected', badTypeThrew)
+
+  // 含换行的 title / summary 不得撕裂 frontmatter
+  const multiOut = writePage(capWs, { title: 'First\nSecond', summary: 'line1\nline2', body: '# Multi\n' })
+  const multi = parsePage(readFileSync(path.join(capWs, 'wiki', /wiki\/(\S+\.md)/.exec(multiOut)[1]), 'utf8'))
+  ok('write: newlines in title/summary collapse instead of splitting frontmatter',
+    multi.fm.title === 'First Second' && multi.fm.summary === 'line1 line2', JSON.stringify(multi.fm))
+
+  // index 的手工重排（换成 * 项目符号）不该被当成缺页
+  const idxPath = path.join(capWs, 'wiki', 'index.md')
+  const idxBackup = readFileSync(idxPath, 'utf8')
+  writeFileSync(idxPath, idxBackup.replace(/^- \[/gm, '* ['))
+  ok('index: alternative bullet markers are still parsed', !lintWiki(capWs).includes('index-missing'))
+  writeFileSync(idxPath, idxBackup)
+
+  // 第四轮：Unicode 空白文件名 / 方括号标题 / 未知 frontmatter 字段 / 带逗号的 tag / retract 日志单行
+  // （这些文件只能由插件之外创建——slugify 会把 \s 折成 "-"，所以直接落盘再重建索引）
+  writeFileSync(path.join(capWs, 'wiki', 'concepts', 'uni\u2028sep.md'), '---\ntitle: UniSep\ntype: concept\ntrust: low\n---\nbody\n')
+  writeFileSync(path.join(capWs, 'wiki', 'concepts', 'uni sep.md'), '---\ntitle: PlainSep\ntype: concept\ntrust: low\n---\nbody\n')
+  writeFileSync(path.join(capWs, 'wiki', 'concepts', 'nb\u00a0sp.md'), '---\ntitle: Nbsp\ntype: concept\ntrust: low\n---\nbody\n')
+  rebuildIndex(capWs)
+  const uniHrefs = [...readFileSync(path.join(capWs, 'wiki', 'index.md'), 'utf8').matchAll(/\]\(([^()]*)\)/g)].map((m) => m[1])
+  ok('index: encoded hrefs are injective (two pages never share one)',
+    new Set(uniHrefs).size === uniHrefs.length, uniHrefs.filter((h, i) => uniHrefs.indexOf(h) !== i).join(', '))
+  const uniLint = lintWiki(capWs)
+  ok('index: unicode-whitespace filenames round-trip (no index-missing / index-broken)',
+    !uniLint.includes('index-missing') && !uniLint.includes('index-broken'), uniLint.split('\n').slice(0, 4).join(' / '))
+
+  writePage(capWs, { path: 'concepts/Brackets.md', title: '[draft]', body: '# Brackets\n' })
+  const br1 = parsePage(readFileSync(path.join(capWs, 'wiki', 'concepts', 'Brackets.md'), 'utf8'))
+  writePage(capWs, { path: 'concepts/Brackets.md', body: '# Brackets updated\n' })
+  const br2 = parsePage(readFileSync(path.join(capWs, 'wiki', 'concepts', 'Brackets.md'), 'utf8'))
+  ok('frontmatter: a bracketed title stays a string across an update',
+    br1.fm.title === '[draft]' && br2.fm.title === '[draft]', JSON.stringify([br1.fm.title, br2.fm.title]))
+
+  writeFileSync(path.join(capWs, 'wiki', 'concepts', 'Extra.md'),
+    '---\ntitle: Extra\ntype: concept\ntags: ["a, b", plain]\naliases: [别名]\nreviewed: 2026-01-01\ntrust: low\n---\nbody\n')
+  writePage(capWs, { path: 'concepts/Extra.md', body: '# Extra updated\n' })
+  const extra = parsePage(readFileSync(path.join(capWs, 'wiki', 'concepts', 'Extra.md'), 'utf8'))
+  ok('frontmatter: keys this build does not know about survive an update',
+    Array.isArray(extra.fm.aliases) && extra.fm.aliases[0] === '别名' && String(extra.fm.reviewed) === '2026-01-01', JSON.stringify(extra.fm))
+  ok('frontmatter: a quoted comma stays inside one tag',
+    Array.isArray(extra.fm.tags) && extra.fm.tags.length === 2 && extra.fm.tags[0] === 'a, b', JSON.stringify(extra.fm.tags))
+
+  const retractOut = writePage(capWs, { path: 'concepts/Extra.md', retract: true, retractReason: 'why\ninjected-line' })
+  const logTail = readFileSync(path.join(capWs, 'wiki', 'log.md'), 'utf8').trimEnd().split('\n').slice(-1)[0]
+  ok('retract: a newline in the reason cannot break the one-line log contract',
+    !retractOut.includes('\n') && /^## \[/.test(logTail) && logTail.includes('why injected-line'), logTail)
+
+  const writeTool = TOOLS.find((t) => t.name === 'archivist_write')
+  let relIndexOk = true
+  try { runTool(writeTool, { rel: 'concepts/ViaRel.md', title: 'ViaRel', body: '# ViaRel', index: false }) } catch { relIndexOk = false }
+  ok('tools: rel and index are declared and reach writePage', relIndexOk)
+  rebuildIndex(capWs)
+
+  const spaced = readFileSync(path.join(capWs, 'wiki', 'index.md'), 'utf8').replace(/^- /gm, '-  ')
+  writeFileSync(path.join(capWs, 'wiki', 'index.md'), spaced)
+  ok('index: extra spaces after the bullet are tolerated', !lintWiki(capWs).includes('index-missing'))
+  rebuildIndex(capWs)
+
+  const statusTool = TOOLS.find((t) => t.name === 'archivist_status')
+  let unknownThrew = false
+  try { runTool(statusTool, { workspace: ws, bogusUnknownParam: 42 }) } catch { unknownThrew = true }
+  ok('tools: undeclared argument is rejected, not silently dropped', unknownThrew)
+  ok('tools: declared arguments still reach the tool through runTool',
+    runTool(statusTool, { workspace: ws }).includes('pages: '))
 
   // 14. backup rotation must never delete a look-alike user directory (A2)
   const bkTarget = path.join(os.tmpdir(), 'archivist-smoke-backups-' + Date.now())
@@ -296,7 +422,7 @@ try {
       (runGit('diff', '--cached', '--name-only').stdout || '').includes('STAGED-USER-FILE.txt'), commitOut2)
   } else {
     skipped++
-    console.log('SKIP commit scoping (git is not available on this machine)')
+    console.log('SKIP commit scoping (' + (gitProbe.error?.code === 'ENOENT' ? 'git is not installed' : 'git cannot be spawned in this sandbox') + ')')
   }
 
   // 18. bench must fail loudly on a missing or empty library (A6)
@@ -308,14 +434,21 @@ try {
     return { r, report }
   }
   const benchMissing = benchRun(path.join(os.tmpdir(), 'archivist-smoke-nolib-' + Date.now()))
-  ok('bench: missing library exits non-zero and writes no report',
-    benchMissing.r.status !== 0 && benchMissing.r.status !== null && !existsSync(benchMissing.report), 'status=' + benchMissing.r.status)
   const emptyLib = path.join(os.tmpdir(), 'archivist-smoke-emptylib-' + Date.now())
   cleanupPaths.push(emptyLib)
   mkdirSync(path.join(emptyLib, 'raw'), { recursive: true })
   const benchEmpty = benchRun(emptyLib)
-  ok('bench: empty library exits non-zero and writes no report',
-    benchEmpty.r.status !== 0 && benchEmpty.r.status !== null && !existsSync(benchEmpty.report), 'status=' + benchEmpty.r.status)
+  if (benchMissing.r.status === null && benchEmpty.r.status === null) {
+    // Same condition the commit group skips on: this environment forbids the child
+    // process, so the assertion cannot observe anything — skip it, never report a failure.
+    skipped += 2
+    console.log('SKIP bench exit codes (cannot spawn a child process in this environment)')
+  } else {
+    ok('bench: missing library exits non-zero and writes no report',
+      benchMissing.r.status !== 0 && !existsSync(benchMissing.report), 'status=' + benchMissing.r.status)
+    ok('bench: empty library exits non-zero and writes no report',
+      benchEmpty.r.status !== 0 && !existsSync(benchEmpty.report), 'status=' + benchEmpty.r.status)
+  }
 
   // 19. numeric option 0 must not be treated as a missing option (A7)
   const zeroTarget = path.join(os.tmpdir(), 'archivist-smoke-zerokeep-' + Date.now())

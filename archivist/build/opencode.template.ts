@@ -35,7 +35,7 @@ export default Plugin.define({
           options: { namespace: "archivist", codemode: true },
           execute: async (input: unknown) => {
             try {
-              return asText(String(tool.run((input ?? {}) as Record<string, unknown>)))
+              return asText(String(runTool(tool, (input ?? {}) as Record<string, unknown>)))
             } catch (error) {
               throw new Error(error instanceof Error ? error.message : String(error))
             }

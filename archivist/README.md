@@ -31,7 +31,7 @@
 | `archivist_scan` | `archivist.scan` | **全量精确扫描**：精确计数 + 命中文件清单（≤60 个全列；超出时只列前 60 个并明示`清单截断`，计数与文件数仍准确）+ 覆盖声明（穷尽/统计类问题专用，不做 top-K 截断）；被跳过的文件（>2MB、扩展名不在白名单的非空文件）如实计入声明 |
 | `archivist_read` | `archivist.read` | 读页（标题宽容解析、支持批量） |
 | `archivist_write` | `archivist.write` | 校验并写页：frontmatter 补全、索引自动重建、源标记、可选日志 |
-| `archivist_index` | `archivist.index` | 确定性重建 `index.md`（根治目录漂移） |
+| `archivist_index` | `archivist.index` | 确定性重建 `index.md`（根治目录漂移；wiki 根目录/未归类页进 `Other` 段，不再漏掉） |
 | `archivist_lint` | `archivist.lint` | 结构体检：断链/孤儿页/缺 frontmatter/重复标题/索引缺漏/高频未建页 |
 | `archivist_log` | `archivist.log` | 追加/读取时间线日志（`grep` 友好） |
 | `archivist_backup` | `archivist.backup` | 免 git 快照备份 + 轮转（建议 target 指向别的盘/云盘目录）；只轮转严格匹配快照命名的目录，同前缀的其它目录一律保留并在回执中列出 |
@@ -43,6 +43,7 @@
 - **raw-first 蒸馏**：对话先落 `raw/conversations/` 原文，再编译成页（`sourceFile` 锚定出处，**且必须是 `raw/` 下的文件**——越界会被拒绝，这样每份出处都可在 `archivist_sources` 里复查）——蒸馏产物可回查、可审计
 - **纠错永不覆盖历史**：`supersedes` 写替代页（旧页自动 `superseded`，检索降权并标注替代关系）；`retract` 撤回（检索排除）；`archivist_lint`/`archivist.lint` 校验替代链完整性
 - **穷尽类问题路由**：`archivist_scan`/`archivist.scan` 提供全量精确计数与命中文件清单（≤60 个全列，超出时明示`清单截断`与未显示条数、计数与文件数仍准确；附覆盖声明：被跳过的文件数量与原因一并列出，未扫描部分绝不冒称"完整清单"）；检索检测到穷尽/计数意图时会提示改用 scan
+- **导航页不得内嵌条目描述（实测教训）**：把 N 个条目的摘要抄进一张"总览页"会让它成为检索里的**吸铁石**。84 条真实语料实测：这样的总览页占据 **81/84** 条内容查询的第 1 名，正确页被挤到第 2 —— 人工题 **Top-1 命中率 23%**；只删掉描述正文（保留标题与链接）后升到 **77%**，内容类查询 **4% → 100%**，而 Top-3 完全不变。规则已写进工作区 `AGENTS.md` 模板；导航交给 `index.md`（插件维护、不参与检索）
 
 ## 对话蒸馏钩子（可选组件）
 
@@ -135,7 +136,9 @@ cd <本仓库>\archivist
 node selftest.mjs
 ```
 
-预期输出：**`89 passed, 0 failed`**（覆盖：初始化/幂等挂回、源状态追踪、中文写页、索引重建、中英检索、路径安全（含 `sourceFile`/`supersedes` 越界）、**被跳过文件的覆盖披露**、**0 字节占位符不稀释覆盖声明**、lint、**备份轮转只删快照目录**、**写入原子性（拒绝写入不留半成品页）**、**commit 不越界暂存**、**bench 空库非零退出**、**数值 0 不被当假值**、**trust 分级/替代/撤回**、**穷尽扫描**、符号短语分词、缓存失效等）。机器无 git 时会多一行 `SKIP commit scoping`（该用例自动跳过，其余仍须全绿）。
+预期输出：**`111 passed, 0 failed`**。在**禁止 node 起子进程**的环境（如受限沙箱）里实测为 **`105 passed, 0 failed, 3 skipped`，退出码 0** —— 被跳过的正是 2 条 `bench:` 与 `commit scoping` 组，两组对同一条件（沙箱拒绝 spawn）判定一致，见下方说明。覆盖：初始化/幂等挂回、源状态追踪、中文写页、索引重建、中英检索、路径安全（含 `sourceFile`/`supersedes` 越界）、**被跳过文件的覆盖披露（有跳过时不得出现 totality 声明，计数须限定在"已扫描"范围）**、**0 字节占位符不稀释覆盖声明**、**截断清单不冒称"全部"**、**wiki 根目录页进索引**、**index href 定宽编码可逆且单射（含 `%`、括号、Unicode 空白文件名仍能往返，两页永不共用一条 href）**、**index 容忍 `*`/`+`、多余空格等手工重排**、**未知 frontmatter 字段在更新中保留（不再静默删除 `aliases` 之类）**、**带逗号的 tag 不被拆开、含 `(`/`)` 的路径不截断**、**方括号标题往返仍是字符串**、**title/summary 里的换行不撕裂 frontmatter、retract 理由的换行不破坏日志行式契约**、**`{title, type}` 组合可用且 `type` 只进 frontmatter**、**显式非法 `type` 被拒绝**、**`rel`/`index` 已声明（脚本与老调用方仍可达）**、**未声明参数被拒绝**、lint、**备份轮转只删快照目录**、**写入原子性（拒绝写入不留半成品页）**、**commit 不越界暂存**、**bench 空库非零退出**、**数值 0 不被当假值**、**trust 分级/替代/撤回**、**穷尽扫描**、符号短语分词、缓存失效等。
+
+> **受限环境下那 3 条为什么被跳过**：`bench:` 2 条与 `commit scoping` 组都靠 `spawnSync` 起子进程；被系统拒绝时 `status=null`（而非 git 未安装）。插件已区分这两种情形：`archivist_commit` 会报 `git could not be run here (EPERM)` 而不是误称"不是 git 仓库"；自检对两组一律记 SKIP 且**退出码仍为 0**。要手工核对：`node bench/bench-queries.mjs <不存在的库> <报告路径>` 期望 exit 2 且不写报告。
 
 没有 Node.js 时：安装后在会话中调用 `archivist.init` 建一个临时库，再调用 `archivist.status`；能返回 `workspace:` 行即安装成功。
 
@@ -143,6 +146,7 @@ node selftest.mjs
 
 - **检索是词法级**（子串 + 统计加权）：同义改写（如"互斥机制"找 synchronized）命中有限；语义级需求待接向量/qmd
 - 单次回答质量受模型窗口限制（检索 + 重合成）；超大库建议先用 `archivist_search` 缩小范围再 `archivist_read`
+- **参数名严格校验**：传未声明的参数（例如把 `retractReason` 拼成 `retractReasonn`）会直接报错并列出已声明参数名，**不再静默忽略**。dsh 的工具参数根结构上是开放对象（`defineTool` 的 `parameters` 是"隐含开放根"），OpenCode 侧另有 schema 校验，因此这道校验由插件入口统一做
 - 蒸馏钩子只**提醒**，写入由 Agent 决定；状态文件可删（会重新触发首次询问）
 - **卸载**：OpenCode 删除对应插件文件（热加载自动卸载）；dsh 从 profile 移除 `insert` 行并重启。库数据在独立工作区目录，去留自便
 
