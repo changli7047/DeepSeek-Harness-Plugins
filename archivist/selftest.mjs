@@ -658,6 +658,47 @@ try {
   ok('write: a lone surrogate is rejected (it cannot be stored as UTF-8)',
     surThrew.includes('U+D800'), surThrew)
 
+  // 第十六轮：单引号 flow 项、引号标量+行尾注释、跨行 flow 内注释、空块标量、supersedes 省略 .md
+  writeFileSync(path.join(concDir, 'SingleQ.md'),
+    "---\ntitle: SingleQ\ntype: concept\ntags: ['a', 'b']\ntrust: low\n---\nbody\n")
+  writePage(capWs, { path: 'concepts/SingleQ.md', body: 'q1\n' })
+  const sqTags = parsePage(readFileSync(path.join(concDir, 'SingleQ.md'), 'utf8')).fm.tags
+  ok('frontmatter: single-quoted flow items are unquoted, not kept as literals',
+    Array.isArray(sqTags) && sqTags.join('|') === 'a|b', JSON.stringify(sqTags))
+
+  writeFileSync(path.join(concDir, 'SingleQComma.md'),
+    "---\ntitle: SingleQComma\ntype: concept\ntags: ['a,b', 'c']\ntrust: low\n---\nbody\n")
+  writePage(capWs, { path: 'concepts/SingleQComma.md', body: 'q2\n' })
+  const sqcTags = parsePage(readFileSync(path.join(concDir, 'SingleQComma.md'), 'utf8')).fm.tags
+  ok('frontmatter: a comma inside single quotes does not split the item',
+    Array.isArray(sqcTags) && sqcTags.length === 2 && sqcTags[0] === 'a,b', JSON.stringify(sqcTags))
+
+  writeFileSync(path.join(concDir, 'QuotedComment.md'),
+    '---\ntitle: "My Page" # note\ntype: concept\ntrust: low\n---\nbody\n')
+  writePage(capWs, { path: 'concepts/QuotedComment.md', body: 'q3\n' })
+  const qcTitle = parsePage(readFileSync(path.join(concDir, 'QuotedComment.md'), 'utf8')).fm.title
+  ok('frontmatter: a trailing comment after a quoted scalar is not folded into the value',
+    qcTitle === 'My Page', JSON.stringify(qcTitle))
+
+  writeFileSync(path.join(concDir, 'FlowComment.md'),
+    '---\ntitle: FlowComment\ntype: concept\ntags: [a, # note\n  b]\ntrust: low\n---\nbody\n')
+  writePage(capWs, { path: 'concepts/FlowComment.md', body: 'q4\n' })
+  const fcTags = parsePage(readFileSync(path.join(concDir, 'FlowComment.md'), 'utf8')).fm.tags
+  ok('frontmatter: a comment inside a multi-line flow list is not treated as an item',
+    Array.isArray(fcTags) && fcTags.join('|') === 'a|b', JSON.stringify(fcTags))
+
+  writeFileSync(path.join(concDir, 'EmptyBlock.md'),
+    '---\ntitle: EmptyBlock\ntype: concept\nraw: |\ntrust: low\n---\nbody\n')
+  writePage(capWs, { path: 'concepts/EmptyBlock.md', body: 'q5\n' })
+  const ebRaw = parsePage(readFileSync(path.join(concDir, 'EmptyBlock.md'), 'utf8')).fm.raw
+  ok('frontmatter: an empty block scalar stays an empty string (not the indicator text)',
+    ebRaw === '', JSON.stringify(ebRaw))
+
+  let selfNoExt = ''
+  try { writePage(capWs, { path: 'concepts/Self.md', supersedes: 'concepts/Self', body: 'X\n' }) } catch (e) { selfNoExt = e.message }
+  ok('supersede: a shorthand target without .md is still recognised as self',
+    selfNoExt.includes('itself'), selfNoExt)
+
   const statusTool = TOOLS.find((t) => t.name === 'archivist_status')
   let unknownThrew = false
   try { runTool(statusTool, { workspace: ws, bogusUnknownParam: 42 }) } catch { unknownThrew = true }

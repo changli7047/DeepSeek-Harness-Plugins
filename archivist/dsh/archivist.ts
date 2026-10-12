@@ -173,25 +173,34 @@ function unquote(v) {
   if (v.length >= 2 && v.startsWith("'") && v.endsWith("'")) return v.slice(1, -1)
   return v
 }
-// YAML allows a trailing comment after a value or block indicator ("raw: | # note"). Strip it
-// before judging the shape — but only a `#` that is outside quotes and outside a flow collection:
-// a quoted item may contain " #", and a flow list must stay whole.
+// A `#` preceded by whitespace starts a YAML comment anywhere outside quotes — including inside a
+// flow collection. Quoted content is scanned so "a # b", [a, "b #c"] and a quoted scalar followed
+// by a trailing comment ("My Page" # note) all keep their value.
 function stripComment(raw) {
   const s = String(raw ?? '').trim()
-  if (/^["']/.test(s)) return s
-  let quoted = false
-  let depth = 0
+  if (/^["']/.test(s)) {
+    const q = s[0]
+    let i = 1
+    while (i < s.length) {
+      if (q === '"' && s[i] === '\\') { i += 2; continue }
+      if (q === "'" && s[i] === "'" && s[i + 1] === "'") { i += 2; continue }
+      if (s[i] === q) break
+      i++
+    }
+    if (i >= s.length) return s                       // unterminated: leave it alone
+    return s.slice(i + 1).trim().startsWith('#') ? s.slice(0, i + 1) : s
+  }
+  let quote = ''
   for (let i = 0; i < s.length; i++) {
     const ch = s[i]
-    if (quoted) {
-      if (ch === '\\') i++
-      else if (ch === '"') quoted = false
+    if (quote) {
+      if (quote === '"' && ch === '\\') { i++; continue }
+      if (quote === "'" && ch === "'" && s[i + 1] === "'") { i++; continue }
+      if (ch === quote) quote = ''
       continue
     }
-    if (ch === '"') { quoted = true; continue }
-    if (ch === '[' || ch === '{') { depth++; continue }
-    if (ch === ']' || ch === '}') { depth = Math.max(0, depth - 1); continue }
-    if (ch === '#' && depth === 0 && (i === 0 || /\s/.test(s[i - 1]))) return s.slice(0, i).trim()
+    if (ch === '"' || ch === "'") { quote = ch; continue }
+    if (ch === '#' && (i === 0 || /\s/.test(s[i - 1]))) return s.slice(0, i).trim()
   }
   return s
 }
@@ -204,24 +213,36 @@ function opensBlockValue(rawInline) {
   return /^$/.test(v) || /^[|>][+-]?\d*[+-]?$/.test(v) || /^(\[[^\]]*|\{[^}]*)$/.test(v)
 }
 
-// Split a flow list on commas outside quotes. Escapes are interpreted only inside quotes,
-// so a bare item keeps its backslashes verbatim.
+// Split a flow list on commas outside quotes. Items are unquoted here; both YAML quote styles are
+// recognised ("" and '' are the escapes for a literal quote inside their own style).
 function splitItems(inner) {
   if (inner.trim() === '') return []
   const out = []
-  let cur = '', quoted = false, esc = false
-  for (const ch of inner) {
-    if (quoted && esc) { cur += ch; esc = false; continue }
-    if (quoted && ch === '\\') { esc = true; continue }
-    if (ch === '"') { quoted = !quoted; continue }
-    if (ch === ',' && !quoted) { out.push(cur); cur = ''; continue }
+  let cur = ''
+  let quote = ''
+  for (let i = 0; i < inner.length; i++) {
+    const ch = inner[i]
+    if (quote === '"') {
+      if (ch === '\\') { cur += inner[++i] ?? ''; continue }
+      if (ch === '"') { quote = ''; continue }
+      cur += ch
+      continue
+    }
+    if (quote === "'") {
+      if (ch === "'" && inner[i + 1] === "'") { cur += "'"; i++; continue }
+      if (ch === "'") { quote = ''; continue }
+      cur += ch
+      continue
+    }
+    if (ch === '"' || ch === "'") { quote = ch; continue }
+    if (ch === ',') { out.push(cur); cur = ''; continue }
     cur += ch
   }
   out.push(cur)
   const items = out.map((s) => s.trim())
   // "[a, ]" is ["a"] in YAML 1.2: the empty tail left by a trailing comma is not an item. An
   // explicitly quoted empty item ("") is kept, because that one was authored on purpose.
-  if (items.length > 1 && items[items.length - 1] === '' && !/"\s*$/.test(inner.trim())) items.pop()
+  if (items.length > 1 && items[items.length - 1] === '' && !/["']\s*$/.test(inner.trim())) items.pop()
   return items
 }
 
@@ -240,15 +261,16 @@ function isPlainItem(l) {
 // simple (flow array, scalar list, one plain scalar); anything else is kept verbatim by the
 // caller. Returning undefined means "keep the block intact".
 function parseBlock(kv, cont) {
-  const inline = kv[2].trim()
-  const joined = [inline, ...cont.map((l) => l.trim())].filter(Boolean).join(' ')
+  const inline = stripComment(kv[2])
+  const clean = cont.map((l) => stripComment(l))
+  const joined = [inline, ...clean].filter(Boolean).join(' ')
   if (joined.startsWith('[') && joined.endsWith(']')) return splitItems(joined.slice(1, -1))
-  const items = cont.filter((l) => l.trim() !== '')
+  const items = clean.filter((l) => l.trim() !== '')
   if (inline === '' && items.length && items.every(isPlainItem)) {
     return items.map((l) => unquote(l.replace(/^\s*-\s+/, '').trim()))
   }
-  if (inline === '' && cont.length === 1 && cont[0].trim() && !/^\S+:(\s|$)/.test(cont[0].trim())) {
-    return unquote(cont[0].trim())
+  if (inline === '' && clean.length === 1 && clean[0].trim() && !/^\S+:(\s|$)/.test(clean[0].trim())) {
+    return unquote(clean[0].trim())
   }
   return undefined
 }
@@ -288,7 +310,10 @@ export function parsePage(text) {
     }
     if (!kv) { extra.push({ key: null, lines: [line] }); continue }
     let v = inline
-    if (v.startsWith('[') && v.endsWith(']')) v = splitItems(v.slice(1, -1))
+    // A block-scalar indicator with nothing indented under it is an EMPTY scalar: storing the
+    // indicator text as the value would silently turn "" into "|".
+    if (/^[|>]/.test(v)) v = ''
+    else if (v.startsWith('[') && v.endsWith(']')) v = splitItems(v.slice(1, -1))
     else v = unquote(v)
     fm[kv[1]] = v
   }
@@ -810,13 +835,21 @@ export function writePage(dir, args) {
       throw new Error(`${oldRel} is plugin-managed and cannot be superseded`)
     }
     if (!inside(path.join(dir, WIKI), oldRel)) throw new Error('supersedes path must stay inside wiki/: ' + oldRel)
-    const oldAbs = path.join(dir, WIKI, oldRel)
+    // "concepts/Old" and "concepts/Old.md" name the same page: resolve the optional extension
+    // before the self/managed checks so a shorthand cannot dodge them.
+    const oldFileRel = existsSync(path.join(dir, WIKI, oldRel)) ? oldRel
+      : existsSync(path.join(dir, WIKI, oldRel + '.md')) ? oldRel + '.md' : oldRel
+    const oldAbs = path.join(dir, WIKI, oldFileRel)
     if (!existsSync(oldAbs)) throw new Error(`supersedes target not found: wiki/${oldRel}`)
+    if (sameFile(dir, oldFileRel, rel)) throw new Error(`cannot supersede a page with itself: wiki/${rel} — write the replacement body directly instead`)
+    if (sameFile(dir, oldFileRel, 'index.md') || sameFile(dir, oldFileRel, 'log.md')) {
+      throw new Error(`${oldFileRel} is plugin-managed and cannot be superseded`)
+    }
     const target = parsePage(readFileSync(oldAbs, 'utf8'))
     // Clean the supersede target here — before this write touches the disk — so a page with a
     // legacy control character cannot leave a half-finished replacement behind (validate
     // everything first; see the atomicity note above).
-    supersede = { rel: oldRel, abs: oldAbs, page: { ...target, fm: sanitizeFm(target.fm), extra: sanitizeExtra(target.extra) } }
+    supersede = { rel: oldFileRel, abs: oldAbs, page: { ...target, fm: sanitizeFm(target.fm), extra: sanitizeExtra(target.extra) } }
   }
 
   // Fields the caller passed explicitly must survive even when the old page kept them in an
@@ -1202,7 +1235,7 @@ export function lintWiki(dir, opts = {}) {
         return !(pk && opensBlockValue(pk[1]))
       })
       if (orphanAt >= 0) {
-        issues.push({ type: 'unparseable-frontmatter', page: p.rel, message: `frontmatter line ${orphanAt + 1} is indented with no key above it — common YAML parsers reject this page; rewrite it to repair` })
+        issues.push({ type: 'unparseable-frontmatter', page: p.rel, message: `frontmatter line ${orphanAt + 1} is indented with no block header above it — YAML parsers either reject the page or fold it into the value above; rewrite it to repair` })
       }
     }
     if (p.fm.status === 'superseded') {
