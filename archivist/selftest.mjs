@@ -699,6 +699,37 @@ try {
   ok('supersede: a shorthand target without .md is still recognised as self',
     selfNoExt.includes('itself'), selfNoExt)
 
+  // 第十七轮：撇号是数据不是引号语法（plain 标量里的 ' 不能进入引号态）
+  writeFileSync(path.join(concDir, 'Apostrophe.md'),
+    "---\ntitle: Apostrophe\ntype: concept\nnote: it's # c\ntrust: low\n---\nbody\n")
+  writePage(capWs, { path: 'concepts/Apostrophe.md', body: 'a1\n' })
+  writePage(capWs, { path: 'concepts/Apostrophe.md', body: 'a2\n' })
+  const apoNote = parsePage(readFileSync(path.join(concDir, 'Apostrophe.md'), 'utf8')).fm.note
+  ok("frontmatter: an apostrophe in a plain scalar does not swallow the trailing comment",
+    apoNote === "it's", JSON.stringify(apoNote))
+
+  writeFileSync(path.join(concDir, 'Apostrophe2.md'),
+    "---\ntitle: Apostrophe2\ntype: concept\nnote: Bob's wiki # note\ntags: [a, it's]\ntrust: low\n---\nbody\n")
+  writePage(capWs, { path: 'concepts/Apostrophe2.md', body: 'a3\n' })
+  const apo2 = parsePage(readFileSync(path.join(concDir, 'Apostrophe2.md'), 'utf8'))
+  ok('frontmatter: an apostrophe inside a flow item is kept as data',
+    apo2.fm.note === "Bob's wiki" && Array.isArray(apo2.fm.tags) && apo2.fm.tags.join('|') === "a|it's",
+    JSON.stringify([apo2.fm.note, apo2.fm.tags]))
+
+  writeFileSync(path.join(concDir, 'SingleEscape.md'),
+    "---\ntitle: SingleEscape\ntype: concept\nnote: 'don''t' # c\ntrust: low\n---\nbody\n")
+  writePage(capWs, { path: 'concepts/SingleEscape.md', body: 'a4\n' })
+  const seNote = parsePage(readFileSync(path.join(concDir, 'SingleEscape.md'), 'utf8')).fm.note
+  ok("frontmatter: '' inside a single-quoted scalar decodes to one quote",
+    seNote === "don't", JSON.stringify(seNote))
+
+  writeFileSync(path.join(concDir, 'NotBlockScale.md'),
+    '---\ntitle: NotBlockScale\ntype: concept\nmath: >= 0.9\ntrust: low\n---\nbody\n')
+  writePage(capWs, { path: 'concepts/NotBlockScale.md', body: 'a5\n' })
+  const mathVal = parsePage(readFileSync(path.join(concDir, 'NotBlockScale.md'), 'utf8')).fm.math
+  ok('frontmatter: a plain scalar starting with > is not mistaken for an empty block scalar',
+    mathVal === '>= 0.9', JSON.stringify(mathVal))
+
   const statusTool = TOOLS.find((t) => t.name === 'archivist_status')
   let unknownThrew = false
   try { runTool(statusTool, { workspace: ws, bogusUnknownParam: 42 }) } catch { unknownThrew = true }

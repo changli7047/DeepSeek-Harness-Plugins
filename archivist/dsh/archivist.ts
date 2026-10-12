@@ -169,8 +169,8 @@ function unquote(v) {
     }
     return out
   }
-  // legacy bare single-quoted scalar
-  if (v.length >= 2 && v.startsWith("'") && v.endsWith("'")) return v.slice(1, -1)
+  // legacy bare single-quoted scalar: '' is the YAML escape for a literal quote
+  if (v.length >= 2 && v.startsWith("'") && v.endsWith("'")) return v.slice(1, -1).replace(/''/g, "'")
   return v
 }
 // A `#` preceded by whitespace starts a YAML comment anywhere outside quotes — including inside a
@@ -199,7 +199,11 @@ function stripComment(raw) {
       if (ch === quote) quote = ''
       continue
     }
-    if (ch === '"' || ch === "'") { quote = ch; continue }
+    if (ch === '"' || ch === "'") {
+      // A quote only starts a quoted scalar at the start of a node: `it's # c` is a plain scalar
+      // with an apostrophe, so the comment after it must still be stripped.
+      if (i === 0 || /[\s,\[{]/.test(s[i - 1])) { quote = ch; continue }
+    }
     if (ch === '#' && (i === 0 || /\s/.test(s[i - 1]))) return s.slice(0, i).trim()
   }
   return s
@@ -234,7 +238,12 @@ function splitItems(inner) {
       cur += ch
       continue
     }
-    if (ch === '"' || ch === "'") { quote = ch; continue }
+    if (ch === '"' || ch === "'") {
+      // A quote opens a quoted item only where an item starts: "it's" in [a, it's] is a plain
+      // scalar whose apostrophe is data, not syntax.
+      const sofar = cur.replace(/\s+$/, '')
+      if (sofar === '' || /[\[{]$/.test(sofar)) { quote = ch; continue }
+    }
     if (ch === ',') { out.push(cur); cur = ''; continue }
     cur += ch
   }
@@ -310,9 +319,10 @@ export function parsePage(text) {
     }
     if (!kv) { extra.push({ key: null, lines: [line] }); continue }
     let v = inline
-    // A block-scalar indicator with nothing indented under it is an EMPTY scalar: storing the
-    // indicator text as the value would silently turn "" into "|".
-    if (/^[|>]/.test(v)) v = ''
+    // A VALID block-scalar indicator with nothing indented under it is an EMPTY scalar: storing
+    // the indicator text as the value would silently turn "" into "|". Anything else that merely
+    // starts with | or > (">= 0.9", "|x| < 1") is a plain scalar and stays as written.
+    if (/^[|>][+-]?\d*[+-]?$/.test(v)) v = ''
     else if (v.startsWith('[') && v.endsWith(']')) v = splitItems(v.slice(1, -1))
     else v = unquote(v)
     fm[kv[1]] = v
