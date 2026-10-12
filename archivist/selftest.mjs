@@ -760,6 +760,17 @@ try {
     !lintWiki(capWs).includes(`index-broken: ${nelName}`) && !lintWiki(capWs).includes('index-missing'),
     lintWiki(capWs).split('\n')[0])
 
+  // 第十九轮：不命名文件的路径必须拒绝（否则变成 listPages 隐藏的 wiki/.md）；核心层也拒未声明参数
+  let dirPathThrew = ''
+  try { writePage(capWs, { path: './', title: 'Payload', body: 'x\n' }) } catch (e) { dirPathThrew = e.message }
+  ok('write: a path that names no file is refused (it used to become a hidden wiki/.md)',
+    dirPathThrew.includes('must name a file') && !existsSync(path.join(capWs, 'wiki', '.md')), dirPathThrew)
+
+  let coreArgThrew = ''
+  try { writePage(capWs, { path: 'concepts/ArgCheck.md', title: 'ArgCheck', tag: ['oops'], body: 'x\n' }) } catch (e) { coreArgThrew = e.message }
+  ok('write: the core rejects undeclared parameters instead of silently ignoring them',
+    coreArgThrew.includes('unknown parameter'), coreArgThrew)
+
   const statusTool = TOOLS.find((t) => t.name === 'archivist_status')
   let unknownThrew = false
   try { runTool(statusTool, { workspace: ws, bogusUnknownParam: 42 }) } catch { unknownThrew = true }

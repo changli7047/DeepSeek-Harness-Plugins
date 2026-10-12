@@ -740,6 +740,12 @@ function slugify(title) {
 }
 
 export function writePage(dir, args) {
+  // Reject undeclared parameters here too: the tool layer validates them, but a script calling the
+  // core directly used to have them silently ignored (a typo'd "tag" would drop the tags).
+  const declared = TOOLS.find((t) => t.name === 'archivist_write')?.schema?.properties ?? {}
+  for (const k of Object.keys(args)) {
+    if (!(k in declared)) throw new Error(`archivist_write: unknown parameter(s) "${k}" — declared: ${Object.keys(declared).join(', ')}`)
+  }
   const pageRel = args.path || args.rel
   let body = String(args.body ?? '')
   let rel = pageRel ? fwd(String(pageRel)) : ''
@@ -754,6 +760,11 @@ export function writePage(dir, args) {
   // "." and empty segments are dropped, so "./concepts/A.md" and "concepts//A.md" name the same
   // page as "concepts/A.md"; a segment that slugs to nothing still needs a real name.
   rel = rel.split('/').filter((seg) => seg !== '' && seg !== '.').map((seg) => slugify(seg) || 'untitled').join('/')
+  // A path that names no file ("/" , "./", ".") must be refused: appending ".md" turned it into
+  // "wiki/.md", which listPages hides — a page no tool could ever find again.
+  if (pageRel && rel === '') {
+    throw new Error(`page path must name a file (e.g. "concepts/A.md" or "A.md"), not a directory: ${pageRel}`)
+  }
   if (!/\.md$/i.test(rel)) rel += '.md'
   if (rel === 'index.md' || rel === 'log.md' || sameFile(dir, rel, 'index.md') || sameFile(dir, rel, 'log.md')) {
     throw new Error(`${rel} is plugin-managed: use archivist_index to rebuild the index, archivist_log to append log entries`)
