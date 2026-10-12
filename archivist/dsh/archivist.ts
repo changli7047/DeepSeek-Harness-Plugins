@@ -173,22 +173,32 @@ function unquote(v) {
   if (v.length >= 2 && v.startsWith("'") && v.endsWith("'")) return v.slice(1, -1).replace(/''/g, "'")
   return v
 }
+// Position of the quote closing the one at `i`, or -1 when it is never closed. An unclosed quote
+// is data, not syntax: `a',' # c` is a plain scalar, and its trailing comment must still be cut.
+function closeQuoteAt(s, i) {
+  const q = s[i]
+  let k = i + 1
+  while (k < s.length) {
+    if (q === '"' && s[k] === '\\') { k += 2; continue }
+    if (q === "'" && s[k] === "'" && s[k + 1] === "'") { k += 2; continue }
+    if (s[k] === q) return k
+    k++
+  }
+  return -1
+}
+
 // A `#` preceded by whitespace starts a YAML comment anywhere outside quotes — including inside a
 // flow collection. Quoted content is scanned so "a # b", [a, "b #c"] and a quoted scalar followed
 // by a trailing comment ("My Page" # note) all keep their value.
 function stripComment(raw) {
   const s = String(raw ?? '').trim()
   if (/^["']/.test(s)) {
-    const q = s[0]
-    let i = 1
-    while (i < s.length) {
-      if (q === '"' && s[i] === '\\') { i += 2; continue }
-      if (q === "'" && s[i] === "'" && s[i + 1] === "'") { i += 2; continue }
-      if (s[i] === q) break
-      i++
-    }
-    if (i >= s.length) return s                       // unterminated: leave it alone
-    return s.slice(i + 1).trim().startsWith('#') ? s.slice(0, i + 1) : s
+    const close = closeQuoteAt(s, 0)
+    if (close < 0) return s                          // unterminated: leave it alone
+    const rest = s.slice(close + 1).trim()
+    if (rest.startsWith('#')) return s.slice(0, close + 1)
+    const idx = s.indexOf(' #', close + 1)
+    return idx >= 0 ? s.slice(0, idx).trim() : s
   }
   let quote = ''
   for (let i = 0; i < s.length; i++) {
@@ -200,9 +210,9 @@ function stripComment(raw) {
       continue
     }
     if (ch === '"' || ch === "'") {
-      // A quote only starts a quoted scalar at the start of a node: `it's # c` is a plain scalar
-      // with an apostrophe, so the comment after it must still be stripped.
-      if (i === 0 || /[\s,\[{]/.test(s[i - 1])) { quote = ch; continue }
+      // A quote only starts a quoted scalar at the start of a node, and only when it is closed:
+      // `it's # c` is a plain scalar with an apostrophe, so the comment after it must still be cut.
+      if ((i === 0 || /[\s,\[{]/.test(s[i - 1])) && closeQuoteAt(s, i) > i) { quote = ch; continue }
     }
     if (ch === '#' && (i === 0 || /\s/.test(s[i - 1]))) return s.slice(0, i).trim()
   }
@@ -487,7 +497,9 @@ function ensureDir(p) { mkdirSync(p, { recursive: true }) }
 // code unit to a FIXED-width escape: fixed width is what makes the encoding injective and
 // exactly invertible. Only the 4-digit form is decoded — accepting bare two-digit escapes
 // would mis-read a literal "%20" that an older index wrote verbatim.
-const encodeHref = (rel) => String(rel).replace(/[%()\s]/g, (c) => '%' + c.charCodeAt(0).toString(16).toUpperCase().padStart(4, '0'))
+// U+0085 (NEL) is valid YAML but is not matched by JS \s, so it is listed explicitly here and in
+// slugify: otherwise it stays raw in a filename and in an index href.
+const encodeHref = (rel) => String(rel).replace(/[%()\s\u0085]/g, (c) => '%' + c.charCodeAt(0).toString(16).toUpperCase().padStart(4, '0'))
 const decodeHref = (h) => String(h).replace(/%([0-9a-f]{4})/gi, (_, hex) => String.fromCharCode(parseInt(hex, 16)))
 const indexLine = (p) => `- [${String(p.title).replace(/\[/g, '［').replace(/\]/g, '］')}](${encodeHref(p.rel)})${p.fm.summary ? ' — ' + p.fm.summary : ''}`
 
@@ -527,10 +539,10 @@ export function rebuildIndex(dir) {
   return pages.length
 }
 
-// YAML 1.2 c-printable excludes C0 (except tab/LF/CR), DEL, the whole C1 block, and
-// U+FFFE/U+FFFF, so a value containing one of these cannot be stored in frontmatter. Lone
-// surrogates are included: they cannot be encoded as UTF-8 (a valid pair is one code point and is
-// only matched with the `u` flag, so emoji are unaffected).
+// YAML 1.2 c-printable excludes C0 (except tab/LF/CR), DEL, the C1 block up to U+009F (U+0085 NEL
+// IS allowed by YAML 1.2 and is folded to a space by oneLine instead), and U+FFFE/U+FFFF. Lone
+// surrogates are included too: they cannot be encoded as UTF-8 (a valid pair is one code point and
+// is only matched with the `u` flag, so emoji are unaffected).
 const YAML_BAD = /[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F-\u0084\u0086-\u009F\uD800-\uDFFF\uFFFE\uFFFF]/gu
 
 // A value the caller supplied is rejected (loud); a value inherited from an older page is
@@ -722,7 +734,7 @@ function recordIngest(dir, rawRel, pageRel, sha) {
 function slugify(title) {
   return title.trim()
     .replace(/[\\/:*?"<>|#]+/g, '-')
-    .replace(/\s+/g, '-')
+    .replace(/[\s\u0085]+/g, '-')
     .replace(/-+/g, '-')
     .replace(/^-|-$/g, '')
 }
@@ -739,9 +751,10 @@ export function writePage(dir, args) {
     rel = `${top}/${slugify(String(args.title))}.md`
   }
   // Normalize every path segment to the slug convention so titles and paths stay consistent.
-  // A segment that slugs to nothing (a title of only punctuation) still needs a real name.
-  rel = rel.split('/').map((seg) => slugify(seg) || 'untitled').join('/')
-  if (!rel.endsWith('.md')) rel += '.md'
+  // "." and empty segments are dropped, so "./concepts/A.md" and "concepts//A.md" name the same
+  // page as "concepts/A.md"; a segment that slugs to nothing still needs a real name.
+  rel = rel.split('/').filter((seg) => seg !== '' && seg !== '.').map((seg) => slugify(seg) || 'untitled').join('/')
+  if (!/\.md$/i.test(rel)) rel += '.md'
   if (rel === 'index.md' || rel === 'log.md' || sameFile(dir, rel, 'index.md') || sameFile(dir, rel, 'log.md')) {
     throw new Error(`${rel} is plugin-managed: use archivist_index to rebuild the index, archivist_log to append log entries`)
   }

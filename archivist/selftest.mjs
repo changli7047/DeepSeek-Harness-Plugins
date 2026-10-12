@@ -730,6 +730,36 @@ try {
   ok('frontmatter: a plain scalar starting with > is not mistaken for an empty block scalar',
     mathVal === '>= 0.9', JSON.stringify(mathVal))
 
+  // 第十八轮：未闭合引号必须当数据（否则行尾注释又被折进值）；路径等价写法、大小写扩展名、NEL
+  writeFileSync(path.join(concDir, 'UnclosedQuote.md'),
+    "---\ntitle: UnclosedQuote\ntype: concept\nnote: a',' # c\ntrust: low\n---\nbody\n")
+  writePage(capWs, { path: 'concepts/UnclosedQuote.md', body: 'u1\n' })
+  const uq = parsePage(readFileSync(path.join(concDir, 'UnclosedQuote.md'), 'utf8')).fm.note
+  ok('frontmatter: an unclosed quote is data, so the trailing comment is still cut',
+    uq === "a','", JSON.stringify(uq))
+
+  writeFileSync(path.join(concDir, 'UnclosedQuote2.md'),
+    "---\ntitle: UnclosedQuote2\ntype: concept\nnote: it's 'fine # c\ntrust: low\n---\nbody\n")
+  writePage(capWs, { path: 'concepts/UnclosedQuote2.md', body: 'u2\n' })
+  const uq2 = parsePage(readFileSync(path.join(concDir, 'UnclosedQuote2.md'), 'utf8')).fm.note
+  ok('frontmatter: an unclosed quote later in the value does not swallow the comment',
+    uq2 === "it's 'fine", JSON.stringify(uq2))
+
+  writePage(capWs, { path: './concepts/Dotted.md', title: 'Dotted', body: 'u3\n' })
+  ok('write: "./concepts/Dotted.md" resolves to concepts/Dotted.md instead of being refused',
+    existsSync(path.join(concDir, 'Dotted.md')), 'page written')
+
+  let upperLog = ''
+  try { writePage(capWs, { path: 'LOG.MD', title: 'UpperLog', body: 'u4\n' }) } catch (e) { upperLog = e.message }
+  ok('write: an upper-case LOG.MD is still refused as a plugin-managed path',
+    upperLog.includes('plugin-managed'), upperLog)
+
+  const nelName = 'NEL' + String.fromCharCode(0x85) + 'page'
+  writePage(capWs, { path: `concepts/${nelName}.md`, title: nelName, body: 'u5\n' })
+  ok('index: a NEL in a filename is escaped and round-trips (lint stays clean)',
+    !lintWiki(capWs).includes(`index-broken: ${nelName}`) && !lintWiki(capWs).includes('index-missing'),
+    lintWiki(capWs).split('\n')[0])
+
   const statusTool = TOOLS.find((t) => t.name === 'archivist_status')
   let unknownThrew = false
   try { runTool(statusTool, { workspace: ws, bogusUnknownParam: 42 }) } catch { unknownThrew = true }
