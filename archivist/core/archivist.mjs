@@ -153,6 +153,37 @@ function unquote(v) {
   if (v.length >= 2 && v.startsWith("'") && v.endsWith("'")) return v.slice(1, -1)
   return v
 }
+// YAML allows a trailing comment after a value or block indicator ("raw: | # note"). Strip it
+// before judging the shape — but only a `#` that is outside quotes and outside a flow collection:
+// a quoted item may contain " #", and a flow list must stay whole.
+function stripComment(raw) {
+  const s = String(raw ?? '').trim()
+  if (/^["']/.test(s)) return s
+  let quoted = false
+  let depth = 0
+  for (let i = 0; i < s.length; i++) {
+    const ch = s[i]
+    if (quoted) {
+      if (ch === '\\') i++
+      else if (ch === '"') quoted = false
+      continue
+    }
+    if (ch === '"') { quoted = true; continue }
+    if (ch === '[' || ch === '{') { depth++; continue }
+    if (ch === ']' || ch === '}') { depth = Math.max(0, depth - 1); continue }
+    if (ch === '#' && depth === 0 && (i === 0 || /\s/.test(s[i - 1]))) return s.slice(0, i).trim()
+  }
+  return s
+}
+
+// Only an empty value, a block-scalar indicator (with optional indentation/chomping), or an
+// unterminated flow collection opens a block. A plain scalar ("trust: low") followed by indented
+// lines is NOT a block: a YAML parser would fold those lines into the scalar.
+function opensBlockValue(rawInline) {
+  const v = stripComment(rawInline)
+  return /^$/.test(v) || /^[|>][+-]?\d*[+-]?$/.test(v) || /^(\[[^\]]*|\{[^}]*)$/.test(v)
+}
+
 // Split a flow list on commas outside quotes. Escapes are interpreted only inside quotes,
 // so a bare item keeps its backslashes verbatim.
 function splitItems(inner) {
@@ -167,8 +198,11 @@ function splitItems(inner) {
     cur += ch
   }
   out.push(cur)
-  // Empty items are kept: dropping them silently changed "[a, \"\", b]" into "[a, b]".
-  return out.map((s) => s.trim())
+  const items = out.map((s) => s.trim())
+  // "[a, ]" is ["a"] in YAML 1.2: the empty tail left by a trailing comma is not an item. An
+  // explicitly quoted empty item ("") is kept, because that one was authored on purpose.
+  if (items.length > 1 && items[items.length - 1] === '' && !/"\s*$/.test(inner.trim())) items.pop()
+  return items
 }
 
 // A block-sequence item is only turned into a list element when it is a plain scalar:
@@ -209,19 +243,24 @@ export function parsePage(text) {
   const extra = []
   const lines = m[1].split(/\r?\n/)
   const indentAt = (n) => n >= 0 && n < lines.length && /^\s+\S/.test(lines[n])
+  // A block may start after blank lines ("raw: |" + blank + content), so skip them here — the
+  // continuation scan below already does.
+  const nextContentIndented = (n) => {
+    let k = n
+    while (k < lines.length && lines[k].trim() === '') k++
+    return indentAt(k)
+  }
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i]
     const kv = /^([A-Za-z_][\w-]*)\s*:\s*(.*)$/.exec(line)
-    const inline = kv ? kv[2].trim() : ''
-    // Only an empty value, a block-scalar indicator, or an unterminated flow list opens a block.
-    // "trust: low" followed by indented lines is NOT a block: those lines are strays that a YAML
-    // parser would fold into the scalar, so they must be handled as keyless extras instead.
-    const opensBlock = /^$/.test(inline) || /^[|>][+-]?\d*$/.test(inline) || (inline.startsWith('[') && !inline.endsWith(']'))
-    if (kv && opensBlock && indentAt(i + 1)) {
+    // The inline value with any trailing comment removed: "raw: | # note" is still a block header,
+    // and "tags: [a] # note" is still a flow list.
+    const inline = kv ? stripComment(kv[2]) : ''
+    if (kv && opensBlockValue(kv[2]) && nextContentIndented(i + 1)) {
       let j = i + 1
       while (j < lines.length && (indentAt(j) || (lines[j].trim() === '' && indentAt(j + 1)))) j++
       const cont = lines.slice(i + 1, j)
-      const value = parseBlock(kv, cont)
+      const value = parseBlock({ ...kv, 2: inline }, cont)
       if (value === undefined) extra.push({ key: kv[1], lines: [line, ...cont] })
       else fm[kv[1]] = value
       i = j - 1
@@ -434,8 +473,10 @@ export function rebuildIndex(dir) {
 }
 
 // YAML 1.2 c-printable excludes C0 (except tab/LF/CR), DEL, the whole C1 block, and
-// U+FFFE/U+FFFF, so a value containing one of these cannot be stored in frontmatter.
-const YAML_BAD = /[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F-\u0084\u0086-\u009F\uFFFE\uFFFF]/g
+// U+FFFE/U+FFFF, so a value containing one of these cannot be stored in frontmatter. Lone
+// surrogates are included: they cannot be encoded as UTF-8 (a valid pair is one code point and is
+// only matched with the `u` flag, so emoji are unaffected).
+const YAML_BAD = /[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F-\u0084\u0086-\u009F\uD800-\uDFFF\uFFFE\uFFFF]/gu
 
 // A value the caller supplied is rejected (loud); a value inherited from an older page is
 // cleaned instead, so a page written by a buggy build stays updatable instead of frozen.
@@ -914,7 +955,7 @@ function scoreDocuments(docs, tokens) {
       if (c > 0) matched++
       if (doc.name !== undefined && doc.name.includes(t)) score += 6 * w
       if (c > 0) score += Math.min(20, c) * w * idf(t)
-      if (doc.tags !== undefined && doc.tags.some((tag) => String(tag).toLowerCase().includes(t))) score += 3 * w
+      if (Array.isArray(doc.tags) && doc.tags.some((tag) => String(tag).toLowerCase().includes(t))) score += 3 * w
     }
     if (score > 0) {
       if (tokens.length > 1 && matched === tokens.length) score += 8
@@ -1131,9 +1172,15 @@ export function lintWiki(dir, opts = {}) {
     const rawFm = /^---\r?\n([\s\S]*?)\r?\n---/.exec(p.raw)?.[1]
     if (rawFm !== undefined) {
       const fml = rawFm.split(/\r?\n/)
-      const orphanAt = fml.findIndex((l, i) => /^\s+\S/.test(l)
-        && !/^[A-Za-z_][\w-]*\s*:\s*(?:[|>][+-]?\d*)?\s*$/.test(fml[i - 1] ?? '')
-        && !/^\s+\S/.test(fml[i - 1] ?? ''))
+      const orphanAt = fml.findIndex((l, i) => {
+        if (!/^\s+\S/.test(l)) return false
+        let p = i - 1
+        while (p >= 0 && fml[p].trim() === '') p--          // a block may follow a blank line
+        const prev = fml[p] ?? ''
+        if (/^\s+\S/.test(prev)) return false
+        const pk = /^[A-Za-z_][\w-]*\s*:(.*)$/.exec(prev)
+        return !(pk && opensBlockValue(pk[1]))
+      })
       if (orphanAt >= 0) {
         issues.push({ type: 'unparseable-frontmatter', page: p.rel, message: `frontmatter line ${orphanAt + 1} is indented with no key above it — common YAML parsers reject this page; rewrite it to repair` })
       }

@@ -624,6 +624,40 @@ try {
   ok('lint: an indented frontmatter line with no parent key is reported',
     lintWiki(capWs).includes('unparseable-frontmatter'), lintWiki(capWs).split('\n')[0])
 
+  // 第十五轮：合法块（含行尾注释）不得被拍平；尾随逗号不造幻影空项；lint 不误报合法块
+  writeFileSync(path.join(concDir, 'TrailComment.md'),
+    '---\ntitle: TrailComment\ntype: concept\ntrust: low\nraw: | # keep this block\n  line1\n  line2\n---\nbody\n')
+  writePage(capWs, { path: 'concepts/TrailComment.md', body: 'tc1\n' })
+  const tc = readFileSync(path.join(concDir, 'TrailComment.md'), 'utf8')
+  ok('frontmatter: a block header with a trailing comment is not flattened',
+    tc.includes('raw: | # keep this block') && tc.includes('  line1') && tc.includes('  line2')
+      && parsePage(tc).fm.raw === undefined,
+    tc.split('\n').slice(0, 9).join(' / '))
+
+  writeFileSync(path.join(concDir, 'TagsComment.md'),
+    '---\ntitle: TagsComment\ntype: concept\ntrust: low\ntags: # my tags\n  - a\n  - b\n---\nbody\n')
+  writePage(capWs, { path: 'concepts/TagsComment.md', body: 'x\n' })
+  const tagsComment = parsePage(readFileSync(path.join(concDir, 'TagsComment.md'), 'utf8')).fm.tags
+  ok('frontmatter: a commented block header still yields a list value (search stays safe)',
+    Array.isArray(tagsComment) && tagsComment.join(',') === 'a,b', JSON.stringify(tagsComment))
+
+  writeFileSync(path.join(concDir, 'TrailComma.md'),
+    '---\ntitle: TrailComma\ntype: concept\ntags: [a, ]\ntrust: low\n---\nbody\n')
+  writePage(capWs, { path: 'concepts/TrailComma.md', body: 'x\n' })
+  const tcTags = parsePage(readFileSync(path.join(concDir, 'TrailComma.md'), 'utf8')).fm.tags
+  ok('frontmatter: a trailing comma does not invent an empty item',
+    Array.isArray(tcTags) && tcTags.length === 1 && tcTags[0] === 'a', JSON.stringify(tcTags))
+
+  writeFileSync(path.join(concDir, 'LegalBlocks.md'),
+    '---\ntitle: LegalBlocks\ntype: concept\ntags: [\n  a,\n  b\n]\nmeta: # note\n  k: v\nraw: |\n\n  after blank\ntrust: low\n---\nbody\n')
+  ok('lint: legal blocks (cross-line flow, commented header, blank before content) are not reported',
+    !/unparseable-frontmatter[^\n]*LegalBlocks\.md/.test(lintWiki(capWs)), lintWiki(capWs).split('\n')[0])
+
+  let surThrew = ''
+  try { writePage(capWs, { path: 'concepts/Sur.md', title: 'a\uD800b', body: '# x\n' }) } catch (e) { surThrew = e.message }
+  ok('write: a lone surrogate is rejected (it cannot be stored as UTF-8)',
+    surThrew.includes('U+D800'), surThrew)
+
   const statusTool = TOOLS.find((t) => t.name === 'archivist_status')
   let unknownThrew = false
   try { runTool(statusTool, { workspace: ws, bogusUnknownParam: 42 }) } catch { unknownThrew = true }
