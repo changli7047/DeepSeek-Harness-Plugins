@@ -490,7 +490,10 @@ function sanitizeExtra(extra, stats) {
   }
   return extra.map((e) => {
     if (typeof e === 'string') return fixLine(e, false)
-    return { ...e, lines: e.lines.map((l, i) => fixLine(l, i === 0 && Boolean(e.nextIndented))) }
+    // `keepText` applies to a real block header only: a keyless junk line that merely happens to
+    // be followed by an indented line is NOT a header, and letting it keep its text emits a bare
+    // indented line that the previous key swallows (same silent-loss family as before).
+    return { ...e, lines: e.lines.map((l, i) => fixLine(l, i === 0 && Boolean(e.key) && Boolean(e.nextIndented))) }
   })
 }
 

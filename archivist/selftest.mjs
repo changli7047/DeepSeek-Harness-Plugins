@@ -583,6 +583,20 @@ try {
   ok('write: a page path resolving onto log.md (any case) is refused instead of wiping the log',
     logPathThrew.includes('plugin-managed'), logPathThrew)
 
+  // 只有"真有键的块头"才能保留文本；keyless 的垃圾行即使后面跟着缩进行也必须注释掉，
+  // 否则会留一条裸缩进行被前一个键（典型是恒在 overrides 里的 last_updated）吞掉。
+  writeFileSync(path.join(concDir, 'Embedded.md'),
+    '---\ntitle: Embedded\ntype: concept\ntags: []\nsources: []\ntrust: low\nlast_updated: 2000-01-01\n\u0092junktext\n  more text\n---\nbody\n')
+  writePage(capWs, { path: 'concepts/Embedded.md', body: 'e1\n' })
+  writePage(capWs, { path: 'concepts/Embedded.md', body: 'e2\n' })
+  const emb1 = readFileSync(path.join(concDir, 'Embedded.md'), 'utf8')
+  writePage(capWs, { path: 'concepts/Embedded.md', body: 'e3\n' })
+  const emb2 = readFileSync(path.join(concDir, 'Embedded.md'), 'utf8')
+  ok('write: a keyless junk line followed by an indented line survives repeated updates',
+    emb2.includes('# junktext') && emb2.includes('  more text') && String(parsePage(emb2).fm.trust) === 'low'
+      && emb1.replace('e2', 'X') === emb2.replace('e3', 'X'),
+    emb2.split('\n').slice(-5).join(' / '))
+
   const statusTool = TOOLS.find((t) => t.name === 'archivist_status')
   let unknownThrew = false
   try { runTool(statusTool, { workspace: ws, bogusUnknownParam: 42 }) } catch { unknownThrew = true }
