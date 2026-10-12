@@ -414,6 +414,29 @@ try {
   ok('frontmatter: a block sequence with a comment item is kept verbatim, not normalised',
     dupKeys(seqOdd).length === 0 && /tags:\n {2}- alpha\n {2}- #x/.test(seqOdd), seqOdd.split('\n').slice(0, 12).join(' / '))
 
+  // 第八轮：显式传参必须赢过"原样保留的块"（否则静默写不进去）；控制字符必须明确拒绝
+  writeFileSync(path.join(concDir, 'BlockOwned.md'),
+    '---\ntitle: BlockOwned\ntype: concept\ntags:\n  - alpha\n  - #x\ntrust: low\n---\nbody\n')
+  const beforeOwned = readFileSync(path.join(concDir, 'BlockOwned.md'), 'utf8')
+  const ownedOut = writePage(capWs, { path: 'concepts/BlockOwned.md', tags: ['gamma'], body: 'body2\n' })
+  const owned = parsePage(readFileSync(path.join(concDir, 'BlockOwned.md'), 'utf8'))
+  ok('write: an explicit argument overrides a block-owned key instead of being dropped',
+    JSON.stringify(owned.fm.tags) === JSON.stringify(['gamma']) && ownedOut.includes('updated')
+      && dupKeys(readFileSync(path.join(concDir, 'BlockOwned.md'), 'utf8')).length === 0
+      && beforeOwned !== readFileSync(path.join(concDir, 'BlockOwned.md'), 'utf8'),
+    `tags=${JSON.stringify(owned.fm.tags)} out=${ownedOut.slice(0, 60)}`)
+
+  let ctrlThrew = ''
+  try { writePage(capWs, { path: 'concepts/Ctrl.md', title: 'a\u0000b', body: '# x\n' }) } catch (e) { ctrlThrew = e.message }
+  ok('write: a control character in frontmatter is rejected with a named reason',
+    ctrlThrew.includes('control character') && ctrlThrew.includes('U+0000'), ctrlThrew)
+
+  const commaPage = writePage(capWs, { title: ',x', tags: [',x'], body: '# comma\n' })
+  const commaRaw = readFileSync(path.join(concDir, ',x.md'), 'utf8')
+  ok('frontmatter: a leading comma is quoted (flow/plain syntax stays valid)',
+    /^title: "/m.test(commaRaw) && /^tags: \["/m.test(commaRaw) && parsePage(commaRaw).fm.title === ',x',
+    commaPage + ' | ' + /^title: .*$/m.exec(commaRaw)[0])
+
   const statusTool = TOOLS.find((t) => t.name === 'archivist_status')
   let unknownThrew = false
   try { runTool(statusTool, { workspace: ws, bogusUnknownParam: 42 }) } catch { unknownThrew = true }

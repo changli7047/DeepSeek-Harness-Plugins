@@ -136,11 +136,13 @@ const encValue = (v) => '"' + String(v).replace(/\\/g, '\\\\').replace(/"/g, '\\
 // real YAML parser would read them differently: YAML indicators, ": ", " #", the empty
 // string, and type-like scalars (null/~/booleans/numbers) that must stay strings.
 const needsQuote = (s) => s === ''
-  || /["'\\\[\]{}]/.test(s)
+  || /["'\\\[\]{},]/.test(s)
   || /^[\s#%&*!|>'"?@`-]/.test(s)
   || /:\s|:$|\s#/.test(s)
   || /^(~|null|true|false)$/i.test(s)
-  || /^[-+]?(\d+(\.\d*)?|\.\d+)([eE][-+]?\d+)?$/.test(s)
+  || /^[-+]?(0[xX][0-9a-fA-F_]+|0[oO][0-7_]+|0[bB][01_]+|(\d[\d_]*)?(\.\d*)?([eE][-+]?\d+)?)$/.test(s)
+  || /^[-+]?\.(inf|nan)$/i.test(s)
+  || /^\d{4}-\d{2}-\d{2}([Tt ].*)?$/.test(s)
 const quoteScalar = (v) => {
   const s = oneLine(v)
   return needsQuote(s) ? encValue(s) : s
@@ -185,6 +187,8 @@ function isPlainItem(l) {
   if (!/^\s*-\s+\S/.test(l)) return false
   const body = l.replace(/^\s*-\s+/, '').trim()
   if (/^[-#?|>&*!%@`\[{]/.test(body)) return false
+  // A hand-written quoted item may carry YAML escapes that unquote() does not decode.
+  if (/^["']/.test(body) && body.includes('\\')) return false
   return !/^[^\s:]+:(\s|$)/.test(body)
 }
 
@@ -237,9 +241,13 @@ export function parsePage(text) {
   return { fm, extra, body: text.slice(m[0].length), raw: text }
 }
 
-function serializePage(fm, body, extra = []) {
-  const blocks = extra.map((e) => (typeof e === 'string' ? { key: null, lines: [e] } : e))
-  // A verbatim block owns its key: emitting the fm value as well would duplicate the key.
+function serializePage(fm, body, extra = [], overrides = new Set()) {
+  // A verbatim block owns its key, so the fm value is skipped to avoid duplicating the key —
+  // unless the caller passed that field explicitly, in which case the argument wins and the
+  // stale block is dropped (otherwise an explicit write would be silently discarded).
+  const blocks = extra
+    .map((e) => (typeof e === 'string' ? { key: null, lines: [e] } : e))
+    .filter((b) => !(b.key && overrides.has(b.key)))
   const claimed = new Set(blocks.map((b) => b.key).filter(Boolean))
   const lines = ['---']
   for (const [k, v] of Object.entries(fm)) {
@@ -430,6 +438,21 @@ export function rebuildIndex(dir) {
   return pages.length
 }
 
+// YAML cannot represent C0 control characters: refusing the write beats producing a page no
+// YAML reader can open.
+function assertYamlSafe(fm) {
+  for (const [k, v] of Object.entries(fm)) {
+    for (const val of Array.isArray(v) ? v : [v]) {
+      if (typeof val !== 'string') continue
+      const bad = /[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/.exec(val)
+      if (bad) {
+        const code = bad[0].codePointAt(0).toString(16).toUpperCase().padStart(4, '0')
+        throw new Error(`frontmatter field "${k}" contains control character U+${code}, which YAML cannot store — remove it`)
+      }
+    }
+  }
+}
+
 export function initWorkspace(dir, opts = {}) {
   if (!dir || !String(dir).trim()) {
     throw new Error('archivist_init requires an explicit workspace path (e.g. "D:/archivist" or "<Documents>/archivist"); recommend a non-system drive plus archivist_backup so an OS reinstall cannot lose it')
@@ -614,7 +637,8 @@ export function writePage(dir, args) {
       retractReason: oneLine(args.retractReason ?? '(no reason given)'),
       last_updated: today(),
     }
-    writeFileSync(abs + '.tmp', serializePage(fmRetract, existing.body.trimEnd() + '\n', existing.extra))
+    assertYamlSafe(fmRetract)
+    writeFileSync(abs + '.tmp', serializePage(fmRetract, existing.body.trimEnd() + '\n', existing.extra, new Set(['retractReason'])))
     renameSync(abs + '.tmp', abs)
     if (args.index !== false) rebuildIndex(dir)
     appendLog(dir, `retract | wiki/${rel}${args.retractReason ? ' — ' + oneLine(args.retractReason) : ''}`)
@@ -687,7 +711,12 @@ export function writePage(dir, args) {
     supersede = { rel: oldRel, abs: oldAbs, page: parsePage(readFileSync(oldAbs, 'utf8')) }
   }
 
-  const text = serializePage(fm, body.trim() + '\n', existing.extra)
+  // Fields the caller passed explicitly must survive even when the old page kept them in an
+  // unparsable block: the argument wins and the stale block is dropped.
+  const overridden = new Set(['title', 'type', 'tags', 'sources', 'trust', 'status', 'summary', 'supersedes', 'retractReason']
+    .filter((k) => args[k] !== undefined))
+  assertYamlSafe(fm)
+  const text = serializePage(fm, body.trim() + '\n', existing.extra, overridden)
   const tmp = abs + '.tmp'
   ensureDir(path.dirname(abs))
   writeFileSync(tmp, text)
@@ -700,7 +729,8 @@ export function writePage(dir, args) {
   let superNote = ''
   if (supersede) {
     const oldFm = { ...supersede.page.fm, status: 'superseded', superseded_by: rel, last_updated: today() }
-    writeFileSync(supersede.abs, serializePage(oldFm, supersede.page.body.trimEnd() + '\n', supersede.page.extra))
+    assertYamlSafe(oldFm)
+    writeFileSync(supersede.abs, serializePage(oldFm, supersede.page.body.trimEnd() + '\n', supersede.page.extra, new Set(['status', 'superseded_by'])))
     appendLog(dir, `supersede | wiki/${rel} ← wiki/${supersede.rel}`)
     superNote = ` | superseded wiki/${supersede.rel}`
   }
