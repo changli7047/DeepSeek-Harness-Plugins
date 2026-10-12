@@ -771,6 +771,27 @@ try {
   ok('write: the core rejects undeclared parameters instead of silently ignoring them',
     coreArgThrew.includes('unknown parameter'), coreArgThrew)
 
+  // 第二十轮：存盘 rel 必须满足 listPages 的可见性谓词（小写扩展名 + 不以点开头）
+  writePage(capWs, { path: 'concepts/Good.md', title: 'GoodPage', tags: ['goodtok'], body: 'goodtok body\n' })
+  writePage(capWs, { path: 'concepts/Good.MD', title: 'GoodPage', tags: ['goodtok'], body: 'goodtok body v2\n' })
+  const goodRaw = readFileSync(path.join(concDir, 'Good.md'), 'utf8')
+  ok('write: an upper-case .MD update lands on the same page and stays discoverable',
+    goodRaw.includes('goodtok body v2')
+      && readdirSync(concDir).filter((f) => /^good\./i.test(f)).join('|') === 'Good.md'
+      && readFileSync(path.join(capWs, 'wiki', 'index.md'), 'utf8').includes('Good.md')
+      && searchWiki(capWs, 'goodtok', 5, 'wiki').includes('concepts/Good.md'),
+    readdirSync(concDir).filter((f) => /^good\./i.test(f)).join('|'))
+
+  let dotThrew = ''
+  try { writePage(capWs, { path: '.notes.md', title: 'Notes', body: 'x\n' }) } catch (e) { dotThrew = e.message }
+  ok('write: a root-level dotfile path is refused (every tool would hide it)',
+    dotThrew.includes('must not start with'), dotThrew)
+
+  let protoThrew = ''
+  try { writePage(capWs, { path: 'concepts/Proto.md', title: 'Proto', constructor: 1, body: 'x\n' }) } catch (e) { protoThrew = e.message }
+  ok('write: Object.prototype member names are rejected as undeclared parameters',
+    protoThrew.includes('unknown parameter'), protoThrew)
+
   const statusTool = TOOLS.find((t) => t.name === 'archivist_status')
   let unknownThrew = false
   try { runTool(statusTool, { workspace: ws, bogusUnknownParam: 42 }) } catch { unknownThrew = true }

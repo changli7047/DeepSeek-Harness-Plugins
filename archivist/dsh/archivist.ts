@@ -744,7 +744,7 @@ export function writePage(dir, args) {
   // core directly used to have them silently ignored (a typo'd "tag" would drop the tags).
   const declared = TOOLS.find((t) => t.name === 'archivist_write')?.schema?.properties ?? {}
   for (const k of Object.keys(args)) {
-    if (!(k in declared)) throw new Error(`archivist_write: unknown parameter(s) "${k}" — declared: ${Object.keys(declared).join(', ')}`)
+    if (!Object.prototype.hasOwnProperty.call(declared, k)) throw new Error(`archivist_write: unknown parameter(s) "${k}" — declared: ${Object.keys(declared).join(', ')}`)
   }
   const pageRel = args.path || args.rel
   let body = String(args.body ?? '')
@@ -766,6 +766,13 @@ export function writePage(dir, args) {
     throw new Error(`page path must name a file (e.g. "concepts/A.md" or "A.md"), not a directory: ${pageRel}`)
   }
   if (!/\.md$/i.test(rel)) rel += '.md'
+  // The stored path must satisfy listPages' visibility predicate: a lower-case extension (it uses
+  // a case-sensitive endsWith, so "Good.MD" would be written but never listed, indexed or searched)
+  // and no leading dot (a root-level dotfile is hidden from every tool).
+  rel = rel.replace(/\.md$/i, '.md')
+  if (rel.startsWith('.')) {
+    throw new Error(`page path must not start with "." (every tool would hide it): ${rel}`)
+  }
   if (rel === 'index.md' || rel === 'log.md' || sameFile(dir, rel, 'index.md') || sameFile(dir, rel, 'log.md')) {
     throw new Error(`${rel} is plugin-managed: use archivist_index to rebuild the index, archivist_log to append log entries`)
   }
