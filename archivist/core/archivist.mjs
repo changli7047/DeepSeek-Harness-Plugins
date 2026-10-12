@@ -106,20 +106,41 @@ function inside(root, rel) {
 // ---------------------------------------------------------------- frontmatter
 
 // A scalar shaped like "[...]" parses back as a list, and a surrounding quote is stripped,
-// so serializePage must quote those; list items are quoted when they carry a comma or a
-// bracket, and splitItems keeps a quoted comma inside one item instead of splitting it.
+// so serializePage quotes any value containing a quote, a backslash, or a bracket. The
+// quoted form escapes exactly two characters and unquote() is its exact inverse, so an
+// update rewrites the same bytes forever (JSON.stringify was not invertible here: the
+// parser stripped quotes without decoding escapes, so backslashes accumulated per update).
+const encValue = (v) => '"' + String(v).replace(/\\/g, '\\\\').replace(/"/g, '\\"') + '"'
 const quoteScalar = (v) => {
   const s = oneLine(v)
-  return /^\[.*\]$/.test(s) || /^["']|["']$/.test(s) ? JSON.stringify(s) : s
+  return /["'\\[\]]/.test(s) ? encValue(s) : s
 }
 const quoteItem = (v) => {
   const s = oneLine(v)
-  return /[,\[\]"']/.test(s) ? JSON.stringify(s) : s
+  return /[,\[\]"'\\]/.test(s) ? encValue(s) : s
 }
+function unquote(v) {
+  if (v.length >= 2 && v.startsWith('"') && v.endsWith('"')) {
+    let out = '', esc = false
+    for (const ch of v.slice(1, -1)) {
+      if (esc) { out += ch; esc = false; continue }
+      if (ch === '\\') { esc = true; continue }
+      out += ch
+    }
+    return out
+  }
+  // legacy bare single-quoted scalar
+  if (v.length >= 2 && v.startsWith("'") && v.endsWith("'")) return v.slice(1, -1)
+  return v
+}
+// Split a flow list on commas outside quotes. Escapes are interpreted only inside quotes,
+// so a bare item keeps its backslashes verbatim.
 function splitItems(inner) {
   const out = []
-  let cur = '', quoted = false
+  let cur = '', quoted = false, esc = false
   for (const ch of inner) {
+    if (quoted && esc) { cur += ch; esc = false; continue }
+    if (quoted && ch === '\\') { esc = true; continue }
     if (ch === '"') { quoted = !quoted; continue }
     if (ch === ',' && !quoted) { out.push(cur); cur = ''; continue }
     cur += ch
@@ -130,26 +151,35 @@ function splitItems(inner) {
 
 export function parsePage(text) {
   const m = /^---\r?\n([\s\S]*?)\r?\n---\r?\n?/.exec(text)
-  if (!m) return { fm: {}, body: text, raw: text }
+  if (!m) return { fm: {}, extra: [], body: text, raw: text }
   const fm = {}
-  for (const line of m[1].split(/\r?\n/)) {
+  // Lines this parser does not understand — block lists, nested maps, block scalars, and
+  // keys outside [A-Za-z_][\w-] — are kept verbatim so a rewrite cannot delete them.
+  const extra = []
+  const lines = m[1].split(/\r?\n/)
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i]
     const kv = /^([A-Za-z_][\w-]*)\s*:\s*(.*)$/.exec(line)
-    if (!kv) continue
+    // A line whose next line is indented starts a block (list, map, block scalar): keep the
+    // whole block verbatim rather than splitting the key from its content.
+    const startsBlock = i + 1 < lines.length && /^\s+\S/.test(lines[i + 1])
+    if (!kv || startsBlock) { extra.push(line); continue }
     let v = kv[2].trim()
     if (v.startsWith('[') && v.endsWith(']')) v = splitItems(v.slice(1, -1))
-    else v = v.replace(/^["']|["']$/g, '')
+    else v = unquote(v)
     fm[kv[1]] = v
   }
-  return { fm, body: text.slice(m[0].length), raw: text }
+  return { fm, extra, body: text.slice(m[0].length), raw: text }
 }
 
-function serializePage(fm, body) {
+function serializePage(fm, body, extra = []) {
   const lines = ['---']
   for (const [k, v] of Object.entries(fm)) {
     if (v === undefined || v === null) continue
     if (Array.isArray(v)) lines.push(`${k}: [${v.map(quoteItem).join(', ')}]`)
     else lines.push(`${k}: ${quoteScalar(v)}`)
   }
+  for (const line of extra) lines.push(line)
   lines.push('---', '')
   return lines.join('\n') + body.replace(/^\s*\n/, '')
 }
@@ -290,14 +320,10 @@ function ensureDir(p) { mkdirSync(p, { recursive: true }) }
 
 // index.md links are parsed back by lintWiki. Escape "%", "(", ")", and every whitespace
 // code unit to a FIXED-width escape: fixed width is what makes the encoding injective and
-// exactly invertible (a variable-width form let "%20" + hex digits collide, and left
-// non-U+0020 whitespace undecodable). Legacy two-character escapes stay decodable so an
-// index written by an older build still parses; rebuilding normalises it.
+// exactly invertible. Only the 4-digit form is decoded — accepting bare two-digit escapes
+// would mis-read a literal "%20" that an older index wrote verbatim.
 const encodeHref = (rel) => String(rel).replace(/[%()\s]/g, (c) => '%' + c.charCodeAt(0).toString(16).toUpperCase().padStart(4, '0'))
-const decodeHref = (h) => String(h).replace(/%(?:[0-9a-f]{4}|25|28|29|20)/gi, (m) => {
-  const code = m.length === 5 ? m.slice(1) : m.slice(1).padStart(4, '0')
-  return String.fromCharCode(parseInt(code, 16))
-})
+const decodeHref = (h) => String(h).replace(/%([0-9a-f]{4})/gi, (_, hex) => String.fromCharCode(parseInt(hex, 16)))
 const indexLine = (p) => `- [${String(p.title).replace(/\[/g, '［').replace(/\]/g, '］')}](${encodeHref(p.rel)})${p.fm.summary ? ' — ' + p.fm.summary : ''}`
 
 export function rebuildIndex(dir) {
@@ -493,7 +519,8 @@ export function writePage(dir, args) {
     rel = `${top}/${slugify(String(args.title))}.md`
   }
   // Normalize every path segment to the slug convention so titles and paths stay consistent.
-  rel = rel.split('/').map((seg) => slugify(seg)).join('/')
+  // A segment that slugs to nothing (a title of only punctuation) still needs a real name.
+  rel = rel.split('/').map((seg) => slugify(seg) || 'untitled').join('/')
   if (!rel.endsWith('.md')) rel += '.md'
   if (rel === 'index.md' || rel === 'log.md') {
     throw new Error(`${rel} is plugin-managed: use archivist_index to rebuild the index, archivist_log to append log entries`)
@@ -519,7 +546,7 @@ export function writePage(dir, args) {
       retractReason: oneLine(args.retractReason ?? '(no reason given)'),
       last_updated: today(),
     }
-    writeFileSync(abs + '.tmp', serializePage(fmRetract, existing.body.trimEnd() + '\n'))
+    writeFileSync(abs + '.tmp', serializePage(fmRetract, existing.body.trimEnd() + '\n', existing.extra))
     renameSync(abs + '.tmp', abs)
     if (args.index !== false) rebuildIndex(dir)
     appendLog(dir, `retract | wiki/${rel}${args.retractReason ? ' — ' + oneLine(args.retractReason) : ''}`)
@@ -535,9 +562,13 @@ export function writePage(dir, args) {
   const trust = args.trust !== undefined
     ? String(args.trust)
     : (existing.fm.trust || (args.sourceFile ? 'medium' : 'low'))
-  if (!['high', 'medium', 'low'].includes(trust)) throw new Error(`invalid trust "${trust}" — use high | medium | low`)
+  // Same rule as `type`: validate what the caller supplied, never the inherited record —
+  // otherwise a hand-written `status: Draft` page could never be updated again.
+  if (args.trust !== undefined && !['high', 'medium', 'low'].includes(trust)) {
+    throw new Error(`invalid trust "${trust}" — use high | medium | low`)
+  }
   const status = args.status !== undefined ? String(args.status) : (existing.fm.status || 'active')
-  if (!['active', 'superseded', 'retracted'].includes(status)) {
+  if (args.status !== undefined && !['active', 'superseded', 'retracted'].includes(status)) {
     throw new Error(`invalid status "${status}" — use active | superseded | retracted`)
   }
   const supersedes = args.supersedes !== undefined
@@ -588,7 +619,7 @@ export function writePage(dir, args) {
     supersede = { rel: oldRel, abs: oldAbs, page: parsePage(readFileSync(oldAbs, 'utf8')) }
   }
 
-  const text = serializePage(fm, body.trim() + '\n')
+  const text = serializePage(fm, body.trim() + '\n', existing.extra)
   const tmp = abs + '.tmp'
   ensureDir(path.dirname(abs))
   writeFileSync(tmp, text)
@@ -601,7 +632,7 @@ export function writePage(dir, args) {
   let superNote = ''
   if (supersede) {
     const oldFm = { ...supersede.page.fm, status: 'superseded', superseded_by: rel, last_updated: today() }
-    writeFileSync(supersede.abs, serializePage(oldFm, supersede.page.body.trimEnd() + '\n'))
+    writeFileSync(supersede.abs, serializePage(oldFm, supersede.page.body.trimEnd() + '\n', supersede.page.extra))
     appendLog(dir, `supersede | wiki/${rel} ← wiki/${supersede.rel}`)
     superNote = ` | superseded wiki/${supersede.rel}`
   }

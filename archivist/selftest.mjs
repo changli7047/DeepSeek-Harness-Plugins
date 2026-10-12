@@ -290,7 +290,7 @@ try {
   rebuildIndex(capWs)
   const uniHrefs = [...readFileSync(path.join(capWs, 'wiki', 'index.md'), 'utf8').matchAll(/\]\(([^()]*)\)/g)].map((m) => m[1])
   ok('index: encoded hrefs are injective (two pages never share one)',
-    new Set(uniHrefs).size === uniHrefs.length, uniHrefs.filter((h, i) => uniHrefs.indexOf(h) !== i).join(', '))
+    uniHrefs.length >= 3 && new Set(uniHrefs).size === uniHrefs.length, `${uniHrefs.length} hrefs; ` + uniHrefs.filter((h, i) => uniHrefs.indexOf(h) !== i).join(', '))
   const uniLint = lintWiki(capWs)
   ok('index: unicode-whitespace filenames round-trip (no index-missing / index-broken)',
     !uniLint.includes('index-missing') && !uniLint.includes('index-broken'), uniLint.split('\n').slice(0, 4).join(' / '))
@@ -319,13 +319,45 @@ try {
   const writeTool = TOOLS.find((t) => t.name === 'archivist_write')
   let relIndexOk = true
   try { runTool(writeTool, { rel: 'concepts/ViaRel.md', title: 'ViaRel', body: '# ViaRel', index: false }) } catch { relIndexOk = false }
-  ok('tools: rel and index are declared and reach writePage', relIndexOk)
+  ok('tools: rel and index are declared and reach writePage',
+    relIndexOk && existsSync(path.join(capWs, 'wiki', 'concepts', 'ViaRel.md')), String(relIndexOk))
   rebuildIndex(capWs)
 
   const spaced = readFileSync(path.join(capWs, 'wiki', 'index.md'), 'utf8').replace(/^- /gm, '-  ')
   writeFileSync(path.join(capWs, 'wiki', 'index.md'), spaced)
   ok('index: extra spaces after the bullet are tolerated', !lintWiki(capWs).includes('index-missing'))
   rebuildIndex(capWs)
+
+  // 第五轮：引号值必须逐次稳定（不能每更新一层反斜杠）、数组项含引号不丢、块状 frontmatter 保留
+  const concDir = path.join(capWs, 'wiki', 'concepts')
+  writePage(capWs, {
+    path: 'concepts/Quoted.md', title: 'Quoted', summary: 'see the file "AGENTS.md"',
+    tags: ['note", see also', 'he said "hi"', '"', 'plain'], body: '# Quoted\n',
+  })
+  const qRaw = () => readFileSync(path.join(concDir, 'Quoted.md'), 'utf8')
+  const qSnapshots = [qRaw()]
+  for (let i = 1; i <= 3; i++) { writePage(capWs, { path: 'concepts/Quoted.md', body: `# Quoted ${i}\n` }); qSnapshots.push(qRaw()) }
+  const qLine = (t) => /^summary: .*$/m.exec(t)[0]
+  const quoted = parsePage(qRaw())
+  ok('frontmatter: a quoted value is byte-stable across repeated updates',
+    new Set(qSnapshots.map(qLine)).size === 1 && quoted.fm.summary === 'see the file "AGENTS.md"', qLine(qRaw()))
+  ok('frontmatter: array items containing quotes and a quoted comma round-trip exactly',
+    Array.isArray(quoted.fm.tags) && quoted.fm.tags.length === 4 && quoted.fm.tags[0] === 'note", see also'
+      && quoted.fm.tags[1] === 'he said "hi"' && quoted.fm.tags[2] === '"' && quoted.fm.tags[3] === 'plain',
+    JSON.stringify(quoted.fm.tags))
+
+  writeFileSync(path.join(concDir, 'Blocky.md'),
+    '---\ntitle: Blocky\ntype: concept\naliases_block:\n  - one\n  - two\nnested:\n  key: value\nnotes: |\n  line a\n  line b\na.b: dotted\n中文键: 值\n2026_plan: year\ntrust: low\n---\nbody\n')
+  writePage(capWs, { path: 'concepts/Blocky.md', body: '# Blocky updated\n' })
+  const blocky = readFileSync(path.join(concDir, 'Blocky.md'), 'utf8')
+  ok('frontmatter: block lists, nested maps, block scalars and odd keys survive an update',
+    ['aliases_block:\n  - one', 'nested:\n  key: value', 'notes: |\n  line a', 'a.b: dotted', '中文键: 值', '2026_plan: year'].every((s) => blocky.includes(s)),
+    blocky.split('\n').slice(0, 16).join(' / '))
+
+  writeFileSync(path.join(concDir, 'Legacy.md'), '---\ntitle: Legacy2\ntype: concept\ntrust: HIGH\nstatus: Draft\n---\nbody\n')
+  let legacyOk = true
+  try { writePage(capWs, { path: 'concepts/Legacy.md', body: '# Legacy2 updated\n' }) } catch { legacyOk = false }
+  ok('write: a legacy invalid trust/status does not block a body-only update', legacyOk)
 
   const statusTool = TOOLS.find((t) => t.name === 'archivist_status')
   let unknownThrew = false
