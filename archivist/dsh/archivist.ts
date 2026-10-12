@@ -235,12 +235,12 @@ export function parsePage(text) {
       while (j < lines.length && (indentAt(j) || (lines[j].trim() === '' && indentAt(j + 1)))) j++
       const cont = lines.slice(i + 1, j)
       const value = parseBlock(kv, cont)
-      if (value === undefined) extra.push({ key: kv[1], lines: [line, ...cont] })
+      if (value === undefined) extra.push({ key: kv[1], lines: [line, ...cont], nextIndented: true })
       else fm[kv[1]] = value
       i = j - 1
       continue
     }
-    if (!kv) { extra.push({ key: null, lines: [line] }); continue }
+    if (!kv) { extra.push({ key: null, lines: [line], nextIndented: indentAt(i + 1) }); continue }
     let v = kv[2].trim()
     if (v.startsWith('[') && v.endsWith(']')) v = splitItems(v.slice(1, -1))
     else v = unquote(v)
@@ -476,17 +476,26 @@ function sanitizeFm(fm, strict = new Set(), stats) {
 // a column-0 line just gets the character replaced by a space, because commenting a block
 // header would detach its content.
 function sanitizeExtra(extra, stats) {
-  const fix = (line) => {
+  // `keepText` marks a line whose next frontmatter line is indented — a block header. Commenting
+  // it would detach its content, so its characters are merely replaced in place instead.
+  const fixLine = (line, keepText) => {
     const s = String(line)
     const hits = s.match(YAML_BAD)
     if (!hits) return s
     if (stats) stats.cleaned += hits.length
     const cleaned = s.replace(YAML_BAD, ' ')
-    if (!/^\s/.test(cleaned)) return cleaned
-    const indent = /^\s*/.exec(cleaned)[0]
-    return `${indent}# ${cleaned.slice(indent.length)}`
+    // Indentation must come from the ORIGINAL line: the space that replaced a leading bad
+    // character is not indentation, and treating it as such shifted the whole line.
+    const indent = /^\s*/.exec(s)[0]
+    if (indent) return `${indent}# ${cleaned.slice(indent.length)}`
+    // A column-0 line becomes a column-0 comment with no leading space: an indented comment
+    // would be swallowed by the previous key's block and dropped when that key is rewritten.
+    return keepText ? cleaned : '# ' + cleaned.replace(/^\s+/, '')
   }
-  return extra.map((e) => (typeof e === 'string' ? fix(e) : { ...e, lines: e.lines.map(fix) }))
+  return extra.map((e) => {
+    if (typeof e === 'string') return fixLine(e, false)
+    return { ...e, lines: e.lines.map((l, i) => fixLine(l, i === 0 && Boolean(e.nextIndented))) }
+  })
 }
 
 export function initWorkspace(dir, opts = {}) {

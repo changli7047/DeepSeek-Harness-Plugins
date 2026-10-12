@@ -455,17 +455,52 @@ try {
       && /cleaned \d+ control char/.test(healOut),
     healThrew || `${JSON.stringify(parsePage(healed).fm.summary)} | ${healOut}`)
 
-  // 清洗必须用空格替换而非删除：删字符会把惰性垃圾行升格成活键（静默改检索语义）
+  // 清洗必须用空格替换而非删除：删字符会把惰性垃圾行升格成活键（静默改检索语义）。
+  // 列 0 的行必须注释成"无前导空格的列 0 注释"，否则会被前一个键的块吞掉并在下次更新里消失。
   writeFileSync(path.join(concDir, 'Junk.md'),
     '---\ntitle: Junk\ntype: concept\n\u0092status: retracted\ntrust: low\n---\nfindme token\n')
   writePage(capWs, { path: 'concepts/Junk.md', body: 'findme token 2\n' })
+  const junkRaw1 = readFileSync(path.join(concDir, 'Junk.md'), 'utf8')
+  writePage(capWs, { path: 'concepts/Junk.md', body: 'findme token 3\n' })
   const junkRaw = readFileSync(path.join(concDir, 'Junk.md'), 'utf8')
   const junkPage = parsePage(junkRaw)
   ok('write: cleaning a junk line must not promote it into a live key',
     junkPage.fm.status === undefined && dupKeys(junkRaw).length === 0
-      && /^\s*#\s*status: retracted$/m.test(junkRaw)
+      && junkRaw.includes('# status: retracted') && !/[ \t]# status: retracted/.test(junkRaw)
       && searchWiki(capWs, 'findme', 5, 'wiki').includes('concepts/Junk.md'),
     `status=${JSON.stringify(junkPage.fm.status)} dupes=${JSON.stringify(dupKeys(junkRaw))}`)
+  ok('write: a cleaned column-0 line survives repeated updates instead of being swallowed',
+    junkRaw1.replace('token 2', 'X') === junkRaw.replace('token 3', 'X') && /^# status: retracted$/m.test(junkRaw),
+    junkRaw.split('\n').slice(-3).join(' / '))
+
+  // 坏字符落在"键名与冒号之间"时不得补出合法键形状（否则页面会静默退出 search/scan）
+  writeFileSync(path.join(concDir, 'Esc.md'),
+    '---\ntitle: Esc\ntype: concept\nstatus\u0092: retracted\ntrust: low\n---\nfindme token\n')
+  writePage(capWs, { path: 'concepts/Esc.md', body: 'esc 1\n' })
+  writePage(capWs, { path: 'concepts/Esc.md', body: 'esc 2\n' })
+  const escRaw = readFileSync(path.join(concDir, 'Esc.md'), 'utf8')
+  const escPage = parsePage(escRaw)
+  ok('write: a bad character inside a key name cannot promote it into a live key',
+    escPage.fm.status === undefined && String(escPage.fm.trust) === 'low'
+      && searchWiki(capWs, 'esc 2', 5, 'wiki').includes('concepts/Esc.md')
+      && !/^status : retracted$/m.test(escRaw),
+    `status=${JSON.stringify(escPage.fm.status)} trust=${JSON.stringify(escPage.fm.trust)}`)
+
+  // 列 0 的序列项垃圾行必须被注释掉，否则映射里混入序列项 = 非法 YAML
+  writeFileSync(path.join(concDir, 'DashJunk.md'),
+    '---\ntitle: DashJunk\ntype: concept\n- \u0092item\ntrust: low\n---\nbody\n')
+  writePage(capWs, { path: 'concepts/DashJunk.md', body: 'dash 1\n' })
+  const dashRaw = readFileSync(path.join(concDir, 'DashJunk.md'), 'utf8')
+  ok('write: a column-0 sequence junk line is commented, not left as a mapping entry',
+    /^# - +item$/m.test(dashRaw) && !/^- {1,2}item$/m.test(dashRaw), dashRaw.split('\n').slice(0, 9).join(' / '))
+
+  // 块标量"首个内容行"的坏字符：注释必须保持与兄弟行相同的缩进
+  writeFileSync(path.join(concDir, 'ScalarFirst.md'),
+    '---\ntitle: ScalarFirst\ntype: concept\nraw: |\n  \u0092alpha\n  beta\ntrust: low\n---\nbody\n')
+  writePage(capWs, { path: 'concepts/ScalarFirst.md', body: 's1\n' })
+  const sfRaw = readFileSync(path.join(concDir, 'ScalarFirst.md'), 'utf8')
+  ok('frontmatter: a bad character on a block scalar first line keeps sibling indentation',
+    /^ {2}#\s+alpha$/m.test(sfRaw) && sfRaw.includes('  beta'), sfRaw.split('\n').slice(0, 12).join(' / '))
 
   // 自我 supersede 会丢正文；插件自管文件不可作为 supersedes 目标
   writeFileSync(path.join(concDir, 'Self.md'), '---\ntitle: Self\ntype: concept\ntrust: low\n---\nORIGINAL\n')
@@ -530,7 +565,7 @@ try {
   writePage(capWs, { path: 'concepts/ScalarBad.md', body: 'b1\n' })
   const scalar = readFileSync(path.join(concDir, 'ScalarBad.md'), 'utf8')
   ok('frontmatter: a bad character mid-block keeps the neighbouring lines attached',
-    scalar.includes('  alpha') && /^\s+# beta$/m.test(scalar) && scalar.includes('  gamma'),
+    scalar.includes('  alpha') && /^\s+#\s+beta$/m.test(scalar) && scalar.includes('  gamma'),
     scalar.split('\n').slice(0, 12).join(' / '))
 
   let selfSpellThrew = ''
