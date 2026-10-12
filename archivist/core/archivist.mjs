@@ -746,6 +746,7 @@ export function writePage(dir, args) {
     throw new Error(`page path must name a file (e.g. "concepts/A.md" or "A.md"), not a directory: ${pageRel}`)
   }
   if (!/\.md$/i.test(rel)) rel += '.md'
+  if (!inside(path.join(dir, WIKI), rel)) throw new Error('page path must stay inside wiki/: ' + rel)
   // The stored path must satisfy listPages' visibility predicate: a lower-case extension (it uses
   // a case-sensitive endsWith, so "Good.MD" would be written but never listed, indexed or searched)
   // and no leading dot (a root-level dotfile is hidden from every tool).
