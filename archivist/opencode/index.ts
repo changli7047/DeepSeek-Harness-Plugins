@@ -119,6 +119,14 @@ function inside(root, rel) {
   const r = path.relative(root, abs)
   return r === '' || (!r.startsWith('..') && !path.isAbsolute(r))
 }
+// Windows paths are case-insensitive and the file system normalizes "./", "//" and "..", so
+// identity must be compared on the resolved path rather than on the raw string: "Log.md" IS
+// "log.md", and "./concepts/A.md" IS "concepts/A.md".
+function sameFile(dir, a, b) {
+  const pa = path.resolve(dir, WIKI, String(a))
+  const pb = path.resolve(dir, WIKI, String(b))
+  return process.platform === 'win32' ? pa.toLowerCase() === pb.toLowerCase() : pa === pb
+}
 
 // ---------------------------------------------------------------- frontmatter
 
@@ -458,16 +466,21 @@ function sanitizeFm(fm, strict = new Set(), stats) {
   return fm
 }
 // Verbatim blocks are inherited text too. A block line carrying a character YAML cannot store
-// is turned into a comment: dropping the line would lose its text, and merely replacing the
-// character would leave stray indentation behind (invalid YAML) — and deleting characters
-// could even promote an inert junk line into a live key.
+// must stay structurally in place: an already-indented line is commented *in place* (keeping
+// its indentation, so following lines keep their parent — commenting at column 0 orphaned
+// them, and a commented key line made the next parse read a bare "key:" and destroy the block);
+// a column-0 line just gets the character replaced by a space, because commenting a block
+// header would detach its content.
 function sanitizeExtra(extra, stats) {
   const fix = (line) => {
     const s = String(line)
     const hits = s.match(YAML_BAD)
     if (!hits) return s
     if (stats) stats.cleaned += hits.length
-    return '# ' + s.replace(YAML_BAD, ' ')
+    const cleaned = s.replace(YAML_BAD, ' ')
+    if (!/^\s/.test(cleaned)) return cleaned
+    const indent = /^\s*/.exec(cleaned)[0]
+    return `${indent}# ${cleaned.slice(indent.length)}`
   }
   return extra.map((e) => (typeof e === 'string' ? fix(e) : { ...e, lines: e.lines.map(fix) }))
 }
@@ -632,7 +645,7 @@ export function writePage(dir, args) {
   // A segment that slugs to nothing (a title of only punctuation) still needs a real name.
   rel = rel.split('/').map((seg) => slugify(seg) || 'untitled').join('/')
   if (!rel.endsWith('.md')) rel += '.md'
-  if (rel === 'index.md' || rel === 'log.md') {
+  if (rel === 'index.md' || rel === 'log.md' || sameFile(dir, rel, 'index.md') || sameFile(dir, rel, 'log.md')) {
     throw new Error(`${rel} is plugin-managed: use archivist_index to rebuild the index, archivist_log to append log entries`)
   }
   if (!inside(path.join(dir, WIKI), rel)) throw new Error('page path must stay inside wiki/: ' + rel)
@@ -730,8 +743,10 @@ export function writePage(dir, args) {
   let supersede = null
   if (args.supersedes !== undefined) {
     const oldRel = fwd(String(args.supersedes)).replace(/^wiki\//, '')
-    if (oldRel === rel) throw new Error(`cannot supersede a page with itself: wiki/${rel} — write the replacement body directly instead`)
-    if (oldRel === 'index.md' || oldRel === 'log.md') throw new Error(`${oldRel} is plugin-managed and cannot be superseded`)
+    if (sameFile(dir, oldRel, rel)) throw new Error(`cannot supersede a page with itself: wiki/${rel} — write the replacement body directly instead`)
+    if (sameFile(dir, oldRel, 'index.md') || sameFile(dir, oldRel, 'log.md')) {
+      throw new Error(`${oldRel} is plugin-managed and cannot be superseded`)
+    }
     if (!inside(path.join(dir, WIKI), oldRel)) throw new Error('supersedes path must stay inside wiki/: ' + oldRel)
     const oldAbs = path.join(dir, WIKI, oldRel)
     if (!existsSync(oldAbs)) throw new Error(`supersedes target not found: wiki/${oldRel}`)

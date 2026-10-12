@@ -463,7 +463,7 @@ try {
   const junkPage = parsePage(junkRaw)
   ok('write: cleaning a junk line must not promote it into a live key',
     junkPage.fm.status === undefined && dupKeys(junkRaw).length === 0
-      && junkRaw.includes('#  status: retracted')
+      && /^\s*#\s*status: retracted$/m.test(junkRaw)
       && searchWiki(capWs, 'findme', 5, 'wiki').includes('concepts/Junk.md'),
     `status=${JSON.stringify(junkPage.fm.status)} dupes=${JSON.stringify(dupKeys(junkRaw))}`)
 
@@ -512,6 +512,41 @@ try {
     supThrew === '' && existsSync(path.join(concDir, 'NewPage.md')) && String(oldAfter.fm.status) === 'superseded'
       && !CTRL.test(readFileSync(path.join(concDir, 'BadOld.md'), 'utf8')),
     `${supThrew} new=${existsSync(path.join(concDir, 'NewPage.md'))} old=${JSON.stringify(oldAfter.fm.status)}`)
+
+  // 缩进行必须"原地注释"：丢缩进会孤立后续块行，注释掉键行会让下次解析销毁块
+  writeFileSync(path.join(concDir, 'MetaBad.md'),
+    '---\ntitle: MetaBad\ntype: concept\nmeta:\n  \u0092a: 1\n  b: 2\ntrust: low\n---\nbody\n')
+  writePage(capWs, { path: 'concepts/MetaBad.md', body: 'b1\n' })
+  const meta1 = readFileSync(path.join(concDir, 'MetaBad.md'), 'utf8')
+  writePage(capWs, { path: 'concepts/MetaBad.md', body: 'b2\n' })
+  const meta2 = readFileSync(path.join(concDir, 'MetaBad.md'), 'utf8')
+  ok('frontmatter: an indented junk line is commented in place so the block survives updates',
+    meta2.includes('  b: 2') && !meta2.includes('meta: ""') && !/\nmeta:\s*\n(?!#|\s+\S)/.test(meta2)
+      && meta1.replace('b1', 'X') === meta2.replace('b2', 'X'),
+    meta2.split('\n').slice(0, 10).join(' / '))
+
+  writeFileSync(path.join(concDir, 'ScalarBad.md'),
+    '---\ntitle: ScalarBad\ntype: concept\nraw: |\n  alpha\n  \u0092beta\n  gamma\ntrust: low\n---\nbody\n')
+  writePage(capWs, { path: 'concepts/ScalarBad.md', body: 'b1\n' })
+  const scalar = readFileSync(path.join(concDir, 'ScalarBad.md'), 'utf8')
+  ok('frontmatter: a bad character mid-block keeps the neighbouring lines attached',
+    scalar.includes('  alpha') && /^\s+# beta$/m.test(scalar) && scalar.includes('  gamma'),
+    scalar.split('\n').slice(0, 12).join(' / '))
+
+  let selfSpellThrew = ''
+  try { writePage(capWs, { path: 'concepts/Self.md', supersedes: './concepts/Self.md', body: 'REPLACEMENT2\n' }) } catch (e) { selfSpellThrew = e.message }
+  ok('supersede: the self-check resists equivalent spellings (./, //, .., case)',
+    selfSpellThrew.includes('itself'), selfSpellThrew)
+
+  let logSpellThrew = ''
+  try { writePage(capWs, { path: 'concepts/LogTarget2.md', title: 'LogTarget2', supersedes: './log.md', body: 'x\n' }) } catch (e) { logSpellThrew = e.message }
+  ok('supersede: plugin-managed targets are refused even spelled with ./ or different case',
+    logSpellThrew.includes('plugin-managed'), logSpellThrew)
+
+  let logPathThrew = ''
+  try { writePage(capWs, { path: 'Log.md', title: 'LogPwn', body: 'pwned\n' }) } catch (e) { logPathThrew = e.message }
+  ok('write: a page path resolving onto log.md (any case) is refused instead of wiping the log',
+    logPathThrew.includes('plugin-managed'), logPathThrew)
 
   const statusTool = TOOLS.find((t) => t.name === 'archivist_status')
   let unknownThrew = false
