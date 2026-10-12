@@ -424,25 +424,36 @@ const YAML_BAD = /[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F-\u0084\u0086-\u0
 
 // A value the caller supplied is rejected (loud); a value inherited from an older page is
 // cleaned instead, so a page written by a buggy build stays updatable instead of frozen.
-function cleanValue(s, key, strict) {
+// Cleaning REPLACES a bad character with a space: deleting it would shift the characters
+// around it, which can promote an inert junk line into a live YAML key or list item.
+function cleanValue(s, key, strict, stats) {
   const bad = String(s).match(YAML_BAD)
   if (!bad) return s
   const code = 'U+' + bad[0].codePointAt(0).toString(16).toUpperCase().padStart(4, '0')
   if (strict) throw new Error(`frontmatter field "${key}" contains control character ${code}, which YAML cannot store — remove it`)
-  return String(s).replace(YAML_BAD, '')
+  if (stats) stats.cleaned += bad.length
+  return String(s).replace(YAML_BAD, ' ')
 }
-function sanitizeFm(fm, strict = new Set()) {
+function sanitizeFm(fm, strict = new Set(), stats) {
   for (const [k, v] of Object.entries(fm)) {
-    if (Array.isArray(v)) fm[k] = v.map((x) => (typeof x === 'string' ? cleanValue(x, k, strict.has(k)) : x))
-    else if (typeof v === 'string') fm[k] = cleanValue(v, k, strict.has(k))
+    if (Array.isArray(v)) fm[k] = v.map((x) => (typeof x === 'string' ? cleanValue(x, k, strict.has(k), stats) : x))
+    else if (typeof v === 'string') fm[k] = cleanValue(v, k, strict.has(k), stats)
   }
   return fm
 }
-// Verbatim blocks are inherited text too: clean them rather than refusing to write the page.
-function sanitizeExtra(extra) {
-  return extra.map((e) => (typeof e === 'string'
-    ? e.replace(YAML_BAD, '')
-    : { ...e, lines: e.lines.map((l) => String(l).replace(YAML_BAD, '')) }))
+// Verbatim blocks are inherited text too. A block line carrying a character YAML cannot store
+// is turned into a comment: dropping the line would lose its text, and merely replacing the
+// character would leave stray indentation behind (invalid YAML) — and deleting characters
+// could even promote an inert junk line into a live key.
+function sanitizeExtra(extra, stats) {
+  const fix = (line) => {
+    const s = String(line)
+    const hits = s.match(YAML_BAD)
+    if (!hits) return s
+    if (stats) stats.cleaned += hits.length
+    return '# ' + s.replace(YAML_BAD, ' ')
+  }
+  return extra.map((e) => (typeof e === 'string' ? fix(e) : { ...e, lines: e.lines.map(fix) }))
 }
 
 export function initWorkspace(dir, opts = {}) {
@@ -613,6 +624,12 @@ export function writePage(dir, args) {
   if (parts.length === 2 && !PAGE_DIRS.includes(parts[0])) {
     throw new Error(`page must live in wiki/{${PAGE_DIRS.join(',')}} or wiki root: ${rel}`)
   }
+  // A path carrying a control character cannot be stored in a filename or an index link.
+  const badRel = rel.match(YAML_BAD)
+  if (badRel) {
+    const code = 'U+' + badRel[0].codePointAt(0).toString(16).toUpperCase().padStart(4, '0')
+    throw new Error(`page path contains control character ${code}, which cannot be stored in a filename or index link — remove it`)
+  }
   if (parts.length > 2) throw new Error('page path too deep: ' + rel)
   const abs = path.join(dir, WIKI, rel)
   const existingText = existsSync(abs) ? readFileSync(abs, 'utf8') : ''
@@ -697,6 +714,8 @@ export function writePage(dir, args) {
   let supersede = null
   if (args.supersedes !== undefined) {
     const oldRel = fwd(String(args.supersedes)).replace(/^wiki\//, '')
+    if (oldRel === rel) throw new Error(`cannot supersede a page with itself: wiki/${rel} — write the replacement body directly instead`)
+    if (oldRel === 'index.md' || oldRel === 'log.md') throw new Error(`${oldRel} is plugin-managed and cannot be superseded`)
     if (!inside(path.join(dir, WIKI), oldRel)) throw new Error('supersedes path must stay inside wiki/: ' + oldRel)
     const oldAbs = path.join(dir, WIKI, oldRel)
     if (!existsSync(oldAbs)) throw new Error(`supersedes target not found: wiki/${oldRel}`)
@@ -708,11 +727,15 @@ export function writePage(dir, args) {
   }
 
   // Fields the caller passed explicitly must survive even when the old page kept them in an
-  // unparsable block: the argument wins and the stale block is dropped.
+  // unparsable block: the argument wins and the stale block is dropped. Strictness follows the
+  // value actually written — passing an empty string falls back to the inherited value, which
+  // is cleaned rather than rejected.
   const overridden = new Set(['title', 'type', 'tags', 'sources', 'trust', 'status', 'summary', 'supersedes', 'last_updated']
-    .filter((k) => args[k] !== undefined || k === 'last_updated'))
-  existing.extra = sanitizeExtra(existing.extra)
-  sanitizeFm(fm, overridden)
+    .filter((k) => Array.isArray(args[k]) || Boolean(args[k]) || k === 'last_updated'))
+  const stats = { cleaned: 0 }
+  existing.extra = sanitizeExtra(existing.extra, stats)
+  sanitizeFm(fm, overridden, stats)
+  const cleanNote = stats.cleaned ? ` | cleaned ${stats.cleaned} control char(s)` : ''
   const text = serializePage(fm, body.trim() + '\n', existing.extra, overridden)
   const tmp = abs + '.tmp'
   ensureDir(path.dirname(abs))
@@ -726,14 +749,17 @@ export function writePage(dir, args) {
   let superNote = ''
   if (supersede) {
     const oldFm = { ...supersede.page.fm, status: 'superseded', superseded_by: rel, last_updated: today() }
-    writeFileSync(supersede.abs, serializePage(oldFm, supersede.page.body.trimEnd() + '\n', supersede.page.extra, new Set(['status', 'superseded_by', 'last_updated'])))
+    const oldText = serializePage(oldFm, supersede.page.body.trimEnd() + '\n', supersede.page.extra, new Set(['status', 'superseded_by', 'last_updated']))
+    // Atomic like the page write above: a torn write here would leave the target half-marked.
+    writeFileSync(supersede.abs + '.tmp', oldText)
+    renameSync(supersede.abs + '.tmp', supersede.abs)
     appendLog(dir, `supersede | wiki/${rel} ← wiki/${supersede.rel}`)
     superNote = ` | superseded wiki/${supersede.rel}`
   }
   let idxNote = ''
   if (args.index !== false) { rebuildIndex(dir); idxNote = ' | index rebuilt' }
   if (args.log) appendLog(dir, String(args.log))
-  return `${existingText ? 'updated' : 'created'} wiki/${rel} (trust:${trust})${idxNote}${logNote}${superNote}${args.log ? ' | logged' : ''}`
+  return `${existingText ? 'updated' : 'created'} wiki/${rel} (trust:${trust})${idxNote}${logNote}${superNote}${cleanNote}${args.log ? ' | logged' : ''}`
 }
 
 function resolveRead(dir, relRaw) {

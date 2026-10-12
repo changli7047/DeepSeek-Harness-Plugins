@@ -447,11 +447,46 @@ try {
   writeFileSync(path.join(concDir, 'HealMe.md'),
     '---\ntitle: HealMe\ntype: concept\nsummary: bad\u0001summary\ntrust: low\n---\nbody\n')
   let healThrew = ''
-  try { writePage(capWs, { path: 'concepts/HealMe.md', body: '# healed\n' }) } catch (e) { healThrew = e.message }
+  let healOut = ''
+  try { healOut = writePage(capWs, { path: 'concepts/HealMe.md', body: '# healed\n' }) } catch (e) { healThrew = e.message }
   const healed = readFileSync(path.join(concDir, 'HealMe.md'), 'utf8')
-  ok('write: a page carrying an inherited control character stays updatable and gets cleaned',
-    healThrew === '' && !CTRL.test(healed) && parsePage(healed).fm.summary === 'badsummary',
-    healThrew || JSON.stringify(parsePage(healed).fm.summary))
+  ok('write: a page carrying an inherited control character stays updatable, cleaned and disclosed',
+    healThrew === '' && !CTRL.test(healed) && parsePage(healed).fm.summary === 'bad summary'
+      && /cleaned \d+ control char/.test(healOut),
+    healThrew || `${JSON.stringify(parsePage(healed).fm.summary)} | ${healOut}`)
+
+  // 清洗必须用空格替换而非删除：删字符会把惰性垃圾行升格成活键（静默改检索语义）
+  writeFileSync(path.join(concDir, 'Junk.md'),
+    '---\ntitle: Junk\ntype: concept\n\u0092status: retracted\ntrust: low\n---\nfindme token\n')
+  writePage(capWs, { path: 'concepts/Junk.md', body: 'findme token 2\n' })
+  const junkRaw = readFileSync(path.join(concDir, 'Junk.md'), 'utf8')
+  const junkPage = parsePage(junkRaw)
+  ok('write: cleaning a junk line must not promote it into a live key',
+    junkPage.fm.status === undefined && dupKeys(junkRaw).length === 0
+      && junkRaw.includes('#  status: retracted')
+      && searchWiki(capWs, 'findme', 5, 'wiki').includes('concepts/Junk.md'),
+    `status=${JSON.stringify(junkPage.fm.status)} dupes=${JSON.stringify(dupKeys(junkRaw))}`)
+
+  // 自我 supersede 会丢正文；插件自管文件不可作为 supersedes 目标
+  writeFileSync(path.join(concDir, 'Self.md'), '---\ntitle: Self\ntype: concept\ntrust: low\n---\nORIGINAL\n')
+  let selfThrew = ''
+  try { writePage(capWs, { path: 'concepts/Self.md', supersedes: 'concepts/Self.md', body: 'REPLACEMENT\n' }) } catch (e) { selfThrew = e.message }
+  ok('supersede: a page cannot supersede itself (the body would be silently reverted)',
+    selfThrew.includes('itself') && readFileSync(path.join(concDir, 'Self.md'), 'utf8').includes('ORIGINAL'), selfThrew)
+
+  let logTargetThrew = ''
+  try { writePage(capWs, { path: 'concepts/LogTarget.md', title: 'LogTarget', supersedes: 'log.md', body: 'x\n' }) } catch (e) { logTargetThrew = e.message }
+  ok('supersede: plugin-managed index.md/log.md are refused as targets',
+    logTargetThrew.includes('plugin-managed'), logTargetThrew)
+
+  let badPathThrew = ''
+  try { writePage(capWs, { path: 'concepts/p\u0092q.md', title: 'BadPath', body: 'x\n' }) } catch (e) { badPathThrew = e.message }
+  ok('write: a control character in the path is refused (it would land in a filename and in index.md)',
+    badPathThrew.includes('U+0092'), badPathThrew)
+
+  let emptyArgOk = true
+  try { writePage(capWs, { path: 'concepts/HealMe.md', summary: '', body: '# healed twice\n' }) } catch { emptyArgOk = false }
+  ok('write: an empty explicit argument falls back to the inherited value instead of tripping the gate', emptyArgOk)
 
   writeFileSync(path.join(concDir, 'Retain.md'),
     '---\ntitle: Retain\ntype: concept\nretractReason:\n  - old reason\n  - #c\ntrust: low\n---\nbody\n')
