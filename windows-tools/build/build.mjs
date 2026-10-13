@@ -31,7 +31,7 @@ const out = template.split('__PS_HOST__').join(host)
 if (out.includes('__PS_')) throw new Error('unreplaced placeholder remains')
 
 const registrations = (out.match(/ctx\.tools\.register/g) ?? []).length
-if (registrations !== 13) throw new Error(`expected 13 tool registrations, found ${String(registrations)}`)
+if (registrations !== 17) throw new Error(`expected 17 tool registrations, found ${String(registrations)}`)
 const applyExports = (out.match(/export function apply/g) ?? []).length
 if (applyExports !== 1) throw new Error(`expected 1 apply export, found ${String(applyExports)}`)
 

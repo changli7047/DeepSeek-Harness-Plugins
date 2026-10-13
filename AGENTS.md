@@ -14,7 +14,7 @@
 
 - `windows-tools/host/wt-host.ps1` 是唯一逻辑源头；改动后运行
   `node windows-tools/build/build.mjs` 重新生成 `windows-tools/dsh/windows-tools.ts`
-  （构建器自带断言：13 个工具注册、1 个 apply 导出，失败即中止）。
+  （构建器自带断言：17 个工具注册、1 个 apply 导出，失败即中止）。
 - `windows-tools/opencode/index.ts` 直接引用同目录 `wt-host.ps1`；发布更新后
   使用方需要重新复制/重新克隆才能拿到新 host。
 - `archivist/core/archivist.mjs` 是 archivist 插件的唯一逻辑源头；改动后运行

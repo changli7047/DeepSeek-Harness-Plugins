@@ -157,6 +157,41 @@ function defaultScreenshotPath(): string {
   return join(dir, `screenshot-${stamp}.png`)
 }
 
+/**
+ * Retention override for screenshots this plugin names itself. The helper prunes
+ * only when the request carries `prune`, and the client sets that flag only for
+ * its own default directory; a caller-supplied filePath is never touched.
+ */
+function screenshotKeep(): number | undefined {
+  const raw = process.env.WINDOWS_TOOLS_SCREENSHOT_KEEP
+  if (raw === undefined || raw.trim() === '') return undefined
+  const parsed = Number.parseInt(raw, 10)
+  if (!Number.isFinite(parsed) || parsed < 1) return undefined
+  return Math.min(parsed, 500)
+}
+
+/**
+ * Element selector shared by windows_find / windows_read / windows_click /
+ * windows_type: every given field is a case-insensitive substring test and all
+ * of them must match. `index` picks among the matches of the same selector, in
+ * the order windows_find prints them, so an index alone is ambiguous and is
+ * rejected by the helper.
+ */
+function elementSelectorSchema(description: string) {
+  return {
+    type: 'object' as const,
+    additionalProperties: false,
+    description,
+    properties: {
+      index: { type: 'integer' as const, description: 'Optional 0-based index among the elements matching the other fields, in the order windows_find prints them; defaults to the first match.' },
+      name: { type: 'string' as const, description: 'Case-insensitive substring of the element name.' },
+      type: { type: 'string' as const, description: 'Case-insensitive substring of the UI Automation control type short name (Button, Edit, Text, ...); a "ControlType." prefix is accepted too.' },
+      automationId: { type: 'string' as const, description: 'Case-insensitive substring of the element AutomationId.' },
+      className: { type: 'string' as const, description: 'Case-insensitive substring of the element class name.' },
+    },
+  }
+}
+
 /** Minimal surface of the attachment store used to return screenshots to the model. */
 interface ImageSaver {
   saveImages: (inputs: readonly { data: Uint8Array; mediaType: string; name?: string }[]) => Promise<readonly ImageAttachmentRef[]>
@@ -257,8 +292,15 @@ export function apply(ctx: Context): void {
     timeoutMs: 45000,
     isConcurrencySafe: () => false,
     async execute(args) {
+      const generatedPath = args.filePath === undefined
       const path = args.filePath ?? defaultScreenshotPath()
       const request: Record<string, unknown> = { cmd: 'screenshot', path }
+      // Retention applies only to the directory this plugin names itself.
+      if (generatedPath) {
+        request.prune = true
+        const keep = screenshotKeep()
+        if (keep !== undefined) request.pruneKeep = keep
+      }
       if (args.window !== undefined) request.window = args.window
       // Forward region arguments one by one: the helper rejects a partial set
       // instead of silently capturing the whole screen.
@@ -292,13 +334,65 @@ export function apply(ctx: Context): void {
   }))
 
   ctx.tools.register(defineTool({
-    name: 'windows_click',
-    description: 'Click a mouse button and report the UI element under the point (UIA hit-test) so you can confirm the target. Default: screen coordinates in virtual-desktop pixels, executed on the real desktop (moves the cursor and changes focus). With `window`: x, y are CLIENT coordinates of that window and the click is posted in the background without moving the mouse or changing focus — best-effort, reliable for classic Win32 and Qt apps (including WeChat 4.x, whose message routing and encoding are handled automatically), while Chromium/Electron apps may ignore synthetic clicks.',
+    name: 'windows_find',
+    description: 'Locate elements inside one window and print them one per line as `[i] <name> | <type> | automationId=<id> | rect=<screen x>,<y>,<w>,<h> | enabled=<true|false>`. `i` is exactly the `element.index` accepted by windows_click / windows_read / windows_type, so a find followed by an action on the same selector is coherent. The type vocabulary is the UI Automation short name (Button, Edit, Text, ListItem, MenuItem, Document, Pane, ...). Every given field matches case-insensitively as a substring and all fields must match. Only on-screen elements with a non-empty rectangle are listed, so a control currently scrolled out of view is not reported. No match prints `no element matched` — an empty result, not an error. No interactive-type whitelist is applied, so static text and container panes are listed too. `limit` defaults to 20 and is capped at 200; when the list is cut short, a final `truncated:` line states how many elements matched in total.',
     parameters: {
-      x: { type: 'integer', required: true, description: 'Screen x coordinate of the click point (client x when window is set).' },
-      y: { type: 'integer', required: true, description: 'Screen y coordinate of the click point (client y when window is set).' },
-      button: { type: 'string', enum: ['left', 'right', 'double'], description: 'Which click to perform; defaults to a single left click.' },
-      window: { type: 'string', description: 'Optional window target: title substring, process name (e.g. Weixin), or PID. Posts the click to that window in the background (x, y are client coordinates, the same space as the windows_screenshot image of that window).' },
+      window: { type: 'string', required: true, description: 'Window to search: title substring, process name (e.g. Weixin), or PID.' },
+      name: { type: 'string', description: 'Optional case-insensitive substring of the element name.' },
+      type: { type: 'string', description: 'Optional case-insensitive substring of the UI Automation control type short name (Button, Edit, Text, ...); a "ControlType." prefix is accepted too.' },
+      automationId: { type: 'string', description: 'Optional case-insensitive substring of the element AutomationId.' },
+      className: { type: 'string', description: 'Optional case-insensitive substring of the element class name. Classic Win32 and Qt apps expose their controls by class (e.g. WindowsForms10.EDIT...) rather than by automation id.' },
+      limit: { type: 'integer', description: 'Maximum number of element lines; defaults to 20, capped at 200.' },
+    },
+    output: {
+      schema: { type: 'string' },
+      render: (_args, value) => [{ type: 'text', text: value }],
+    },
+    timeoutMs: 30000,
+    isConcurrencySafe: () => false,
+    async execute(args) {
+      const request: Record<string, unknown> = { cmd: 'find', target: args.window }
+      if (args.name !== undefined) request.name = args.name
+      if (args.type !== undefined) request.type = args.type
+      if (args.automationId !== undefined) request.automationId = args.automationId
+      if (args.className !== undefined) request.className = args.className
+      if (args.limit !== undefined) request.limit = args.limit
+      return callHost(request, 30000)
+    },
+  }))
+
+  ctx.tools.register(defineTool({
+    name: 'windows_read',
+    description: 'Read text out of a window or out of one element. With `element` (and `window` as the search root) it reads that element: UI Automation ValuePattern first, then TextPattern, then the element name. With `window` alone it returns the text of the largest readable Document/Edit control inside that window — static labels are not included, so a window whose text lives in labels reports `(no readable text control inside the window)`. With neither it reads the currently focused control. Read-only: it never changes focus and never writes.',
+    parameters: {
+      window: { type: 'string', description: 'Window target: title substring, process name, or PID. Omitted together with element, the focused control is read instead.' },
+      element: elementSelectorSchema('Optional element to read inside `window`; requires `window` as the search root.'),
+    },
+    output: {
+      schema: { type: 'string' },
+      render: (_args, value) => [{ type: 'text', text: value }],
+    },
+    timeoutMs: 30000,
+    isConcurrencySafe: () => false,
+    async execute(args) {
+      if (args.element !== undefined && args.window === undefined) throw new Error('reading an element needs window (the target window to search in)')
+      const request: Record<string, unknown> = { cmd: 'read' }
+      if (args.window !== undefined) request.target = args.window
+      if (args.element !== undefined) request.element = args.element
+      return callHost(request, 30000)
+    },
+  }))
+
+  ctx.tools.register(defineTool({
+    name: 'windows_click',
+    description: 'Click a mouse button. Default: screen coordinates in virtual-desktop pixels, executed on the real desktop (moves the cursor and changes focus). With `window`: x, y are CLIENT coordinates of that window and the click is posted in the background without moving the mouse or changing focus — reliable for classic Win32 and Qt apps (including WeChat 4.x, whose message routing and encoding are handled automatically), but a posted click is NOT turned into an input event by WPF/WinUI (measured: eight variants — Post/Send, with and without WM_MOUSEMOVE, client or screen coordinates, with WM_MOUSEACTIVATE — none of them fired a WPF button handler), and Chromium/Electron apps may ignore synthetic clicks too. To actually fire an element in WPF/WinUI you must pass `allowForeground: true` with `element`, which may bring the target window to the foreground. Instead of x/y you may pass `element` together with `window`: the host locates the element with UI Automation and reports the element it hit plus the `strategy` it used. The default element strategy is `background-post` (a posted click at the centre of the element rectangle); UIA `uia-invoke-pattern` is attempted only with `allowForeground: true`. Click replies always end with `verified=false`: delivery of the message or the pattern call is observable, the application reacting to it is not.',
+    parameters: {
+      x: { type: 'integer', description: 'Screen x coordinate of the click point (client x when window is set); required unless `element` is given.' },
+      y: { type: 'integer', description: 'Screen y coordinate of the click point (client y when window is set); required unless `element` is given.' },
+      button: { type: 'string', enum: ['left', 'right', 'double'], description: 'Which click to perform; defaults to a single left click. Only a left click can use uia-invoke-pattern.' },
+      window: { type: 'string', description: 'Optional window target: title substring, process name (e.g. Weixin), or PID. Posts the click to that window in the background (x, y are client coordinates, the same space as the windows_screenshot image of that window). Required when `element` is used.' },
+      element: elementSelectorSchema('Optional element to click instead of x/y; requires `window`. The response names the strategy: `background-post` (default, no focus change) or `uia-invoke-pattern` (only with allowForeground).'),
+      allowForeground: { type: 'boolean', description: 'Allow the element click to use UIA InvokePattern, which may bring the target window to the foreground; defaults to false, in which case the click is always posted in the background.' },
     },
     output: {
       schema: { type: 'string' },
@@ -307,6 +401,13 @@ export function apply(ctx: Context): void {
     timeoutMs: 15000,
     isConcurrencySafe: () => false,
     async execute(args) {
+      if (args.element !== undefined) {
+        if (args.window === undefined) throw new Error('clicking an element needs window (the target window to search in)')
+        const request: Record<string, unknown> = { cmd: 'mouse', mode: 'click', button: args.button ?? 'left', window: args.window, element: args.element }
+        if (args.allowForeground === true) request.allowForeground = true
+        return callHost(request, 15000)
+      }
+      if (args.x === undefined || args.y === undefined) throw new Error('click needs x and y, or an element selector with window')
       const request: Record<string, unknown> = { cmd: 'mouse', mode: 'click', x: args.x, y: args.y, button: args.button ?? 'left' }
       if (args.window !== undefined) request.window = args.window
       return callHost(request, 15000)
@@ -380,13 +481,14 @@ export function apply(ctx: Context): void {
 
   ctx.tools.register(defineTool({
     name: 'windows_type',
-    description: "Type text into the focused control with exact Unicode input (spaces, punctuation, CJK and symbols are preserved). After typing, the focused control is read back and the call fails if the text did not land. Mode 'keys' (default) synthesizes per-character Unicode input; mode 'paste' uses the clipboard for bulk text. Set `clear` to select all (Ctrl+A) first; set `activate` to bring a window forward atomically before typing. With `window`, the text is posted to that window in the background (no focus change, result not verified, `clear` is ignored) — best-effort: ASCII is reliable; CJK is reliable for classic Win32 and Qt apps including WeChat 4.x (byte encoding handled automatically) but may be garbled or dropped by modern WinUI/UWP apps, so prefer foreground mode with `activate` there.",
+    description: "Type text into the focused control with exact Unicode input (spaces, punctuation, CJK and symbols are preserved). After typing, the focused control is read back and the call fails if the text did not land. Mode 'keys' (default) synthesizes per-character Unicode input; mode 'paste' uses the clipboard for bulk text. Set `clear` to select all (Ctrl+A) first; set `activate` to bring a window forward atomically before typing. With `window`, the text is posted to that window in the background (no focus change, `clear` is ignored) — best-effort: ASCII is reliable; CJK is reliable for classic Win32 and Qt apps including WeChat 4.x (byte encoding handled automatically) but may be garbled or dropped by modern WinUI/UWP apps, so prefer foreground mode with `activate` there. With `element` (plus `window` as the search root) the text goes to that element through a fixed fallback chain, and every response ends with `[strategy=<leg>] [verified=<true|false>]`: `uia-value-pattern` (UI Automation ValuePattern), then `wm-settext` (WM_SETTEXT to the element's native window handle), then `keystream` (the plain background character stream). Classic Win32 and Qt apps expose no ValuePattern, so they land on `wm-settext` or `keystream`. `verified=true` only when the text could be read back from the element; the background and element paths never touch the clipboard (only an explicit foreground `mode: 'paste'` writes it). The host layer contains no SetForegroundWindow/SetActiveWindow, but the target application's own UI Automation provider may still bring its window forward: on WPF the element path can do that (reproduced in three independent comparisons — 3 of 28 element writes, against 0 of 32 control writes), and the reply then carries `activated=true` instead of staying silent about it. Do not assume the element path leaves the foreground untouched.",
     parameters: {
       text: { type: 'string', required: true, description: 'The text to type into the focused control.' },
-      clear: { type: 'boolean', description: 'Select all existing content (Ctrl+A) before typing; defaults to false.' },
-      mode: { type: 'string', enum: ['keys', 'paste'], description: "Input method; defaults to 'keys' (exact per-character Unicode input). 'paste' is faster for large text." },
+      clear: { type: 'boolean', description: 'Select all existing content (Ctrl+A) before typing; defaults to false. Ignored by the background and keystream paths, which cannot replace a selection.' },
+      mode: { type: 'string', enum: ['keys', 'paste'], description: "Input method; defaults to 'keys' (exact per-character Unicode input). 'paste' is faster for large text and is the only path that writes the clipboard." },
       activate: { type: 'string', description: 'Optional window title substring, process name, or PID to activate first, in the same call.' },
-      window: { type: 'string', description: 'Optional window target: title substring, process name (e.g. Weixin), or PID. Posts the text to that window in the background instead of the focused control.' },
+      window: { type: 'string', description: 'Optional window target: title substring, process name (e.g. Weixin), or PID. Posts the text to that window in the background instead of the focused control. Required when `element` is used.' },
+      element: elementSelectorSchema('Optional element to type into instead of the focused control; requires `window`. The response names the strategy leg that carried the text, whether it could be read back, and `activated=true` when the target window ended up in the foreground.'),
     },
     output: {
       schema: { type: 'string' },
@@ -396,9 +498,11 @@ export function apply(ctx: Context): void {
     isConcurrencySafe: () => false,
     async execute(args) {
       if (args.text.length === 0) throw new Error('text must not be empty')
+      if (args.element !== undefined && args.window === undefined) throw new Error('typing into an element needs window (the target window to search in)')
       const request: Record<string, unknown> = { cmd: 'type', text: args.text, clear: args.clear === true, mode: args.mode ?? 'keys' }
       if (args.activate !== undefined) request.activate = args.activate
       if (args.window !== undefined) request.window = args.window
+      if (args.element !== undefined) request.element = args.element
       return callHost(request, 30000)
     },
   }))
@@ -444,6 +548,58 @@ export function apply(ctx: Context): void {
       const request: Record<string, unknown> = { cmd: 'launch', target: args.target }
       if (args.args !== undefined) request.args = args.args
       return callHost(request, 15000)
+    },
+  }))
+
+  ctx.tools.register(defineTool({
+    name: 'windows_window',
+    description: 'Move, resize, minimize, maximize, restore, close or pin a window, and report the rectangle and state measured AFTER the operation. These actions do not request the foreground: move/resize/topmost use SetWindowPos with SWP_NOACTIVATE, minimize/maximize/restore use ShowWindow, close posts WM_CLOSE, and the layer contains no SetForegroundWindow/SetActiveWindow. That is not a promise that no window reaches the foreground: minimizing a window that is currently foreground hands the foreground to the next window in Z order (Windows semantics), and a target application can activate its own window by itself. The cursor is not moved by these calls. An action is reported as successful only when the fresh measurement agrees with the request — move/resize allow a 2 px rounding slack for DPI-scaled windows (farther off still fails), and the reply always carries the measured rectangle rather than an echo of the request. Consequences worth knowing: moving or resizing a minimized window cannot take effect (restore it first), and `close` waits up to 1.5 s and fails if the window is still there, e.g. because it is showing a confirmation dialog. There is deliberately no activate/focus action — use windows_app with action "activate" for that.',
+    parameters: {
+      action: { type: 'string', enum: ['move', 'resize', 'minimize', 'maximize', 'restore', 'close', 'topmost'], required: true, description: 'Operation to perform.' },
+      target: { type: 'string', required: true, description: 'Window target: title substring, process name, or PID.' },
+      x: { type: 'integer', description: 'Target screen x for move (required), or an optional x when resizing.' },
+      y: { type: 'integer', description: 'Target screen y for move (required), or an optional y when resizing.' },
+      width: { type: 'integer', description: 'Target width for resize (required, positive).' },
+      height: { type: 'integer', description: 'Target height for resize (required, positive).' },
+      on: { type: 'boolean', description: 'For topmost: true pins the window above others, false unpins it; defaults to true.' },
+    },
+    output: {
+      schema: { type: 'string' },
+      render: (_args, value) => [{ type: 'text', text: value }],
+    },
+    timeoutMs: 20000,
+    isConcurrencySafe: () => false,
+    async execute(args) {
+      const request: Record<string, unknown> = { cmd: 'winop', action: args.action, target: args.target }
+      if (args.x !== undefined) request.x = args.x
+      if (args.y !== undefined) request.y = args.y
+      if (args.width !== undefined) request.width = args.width
+      if (args.height !== undefined) request.height = args.height
+      if (args.on !== undefined) request.on = args.on
+      return callHost(request, 20000)
+    },
+  }))
+
+  ctx.tools.register(defineTool({
+    name: 'windows_process',
+    description: 'Enumerate top-level windows, one line per window as `<pid> <name> | <title> | visible=<true|false>`. By default only visible windows that carry a title are listed, so a process with several hidden helper windows cannot push its real window out of `limit`; pass `includeHidden: true` to list those hidden windows as well, which is the only case where a line reads visible=false. Read-only: nothing is started or terminated. `name` filters the process image name case-insensitively as a substring (a trailing .exe is ignored; a plain number is matched against the pid instead). No match prints `no process matched`. `limit` defaults to 50 and is capped at 200.',
+    parameters: {
+      name: { type: 'string', description: 'Optional case-insensitive substring of the process image name (e.g. Weixin, chrome); a trailing .exe is ignored, and a plain number is matched against the pid.' },
+      includeHidden: { type: 'boolean', description: 'Also list hidden top-level windows of those processes; defaults to false, so every line reads visible=true.' },
+      limit: { type: 'integer', description: 'Maximum number of window lines; defaults to 50, capped at 200.' },
+    },
+    output: {
+      schema: { type: 'string' },
+      render: (_args, value) => [{ type: 'text', text: value }],
+    },
+    timeoutMs: 30000,
+    isConcurrencySafe: () => false,
+    async execute(args) {
+      const request: Record<string, unknown> = { cmd: 'procs' }
+      if (args.name !== undefined) request.name = args.name
+      if (args.includeHidden === true) request.includeHidden = true
+      if (args.limit !== undefined) request.limit = args.limit
+      return callHost(request, 30000)
     },
   }))
 
@@ -497,10 +653,15 @@ export function apply(ctx: Context): void {
 
   ctx.tools.register(defineTool({
     name: 'windows_wait_for',
-    description: 'Wait until a desktop condition becomes true instead of sleeping blindly, then return; it fails with a timeout error when the condition never appears. Conditions: foreground (the foreground window title contains `value`), window (any visible window title contains `value`), pixel (the screen pixel at x, y changes from its color at call time), region (the average pixel difference inside x, y, width, height exceeds `threshold`, default 20; works for web-style UI that never changes window titles), settle (the region — or the whole screen when omitted — stays unchanged for `stableFrames` consecutive frames, default 3; use after any action to wait for rendering to finish). The region conditions take x, y, width and height together or not at all.',
+    description: 'Wait until a desktop condition becomes true instead of sleeping blindly, then return; it fails with a timeout error when the condition never appears. Conditions: foreground (the foreground window title contains `value`), window (any visible window title contains `value`), element (an element matching name/type/automationId/className appears inside `target`; the reply carries the matching element line in the same format as windows_find), windowgone (no top-level window matches `target` any more), text (the text of `target` contains `value`; same text source as windows_read with a window, so labels do not count, and a short context snippet is returned), pixel (the screen pixel at x, y changes from its color at call time), region (the average pixel difference inside x, y, width, height exceeds `threshold`, default 20; works for web-style UI that never changes window titles), settle (the region — or the whole screen when omitted — stays unchanged for `stableFrames` consecutive frames, default 3; use after any action to wait for rendering to finish). The region conditions take x, y, width and height together or not at all. Empty values are rejected: an empty title substring matches every window and would report success instantly.',
     parameters: {
-      kind: { type: 'string', enum: ['foreground', 'window', 'pixel', 'region', 'settle'], required: true, description: 'Condition to wait for.' },
-      value: { type: 'string', description: 'Title substring for the foreground/window conditions: required and must not be empty for those kinds, unused otherwise.' },
+      kind: { type: 'string', enum: ['foreground', 'window', 'element', 'windowgone', 'text', 'pixel', 'region', 'settle'], required: true, description: 'Condition to wait for.' },
+      value: { type: 'string', description: 'Title substring for the foreground/window conditions, or the substring to look for in kind text: required and must not be empty for those kinds, unused otherwise.' },
+      target: { type: 'string', description: 'Window target: for kind element/text the window to search or read, for kind windowgone the window that should disappear — title substring, process name, or PID.' },
+      name: { type: 'string', description: 'Kind element: case-insensitive substring of the element name.' },
+      type: { type: 'string', description: 'Kind element: case-insensitive substring of the UI Automation control type short name (Button, Edit, Text, ...).' },
+      automationId: { type: 'string', description: 'Kind element: case-insensitive substring of the element AutomationId.' },
+      className: { type: 'string', description: 'Kind element: case-insensitive substring of the element class name.' },
       x: { type: 'integer', description: 'Screen x coordinate: the pixel for kind pixel, or the region left edge for kind region/settle (all four region values must be given together).' },
       y: { type: 'integer', description: 'Screen y coordinate: the pixel for kind pixel, or the region top edge for kind region/settle (all four region values must be given together).' },
       width: { type: 'integer', description: 'Region width for kind region/settle; omit all four region values to watch the whole screen.' },
@@ -519,8 +680,29 @@ export function apply(ctx: Context): void {
       if (args.kind === 'pixel' && (args.x === undefined || args.y === undefined)) {
         throw new Error('pixel condition requires x and y')
       }
+      if ((args.kind === 'foreground' || args.kind === 'window') && (args.value === undefined || args.value.length === 0)) {
+        throw new Error(`wait_for kind "${args.kind}" needs a non-empty value (the title substring to wait for)`)
+      }
+      if (args.kind === 'element') {
+        if (args.target === undefined) throw new Error('wait_for kind "element" needs target (the window to search in)')
+        if (args.name === undefined && args.type === undefined && args.automationId === undefined && args.className === undefined) {
+          throw new Error('wait_for kind "element" needs at least one of name, type, automationId, className')
+        }
+      }
+      if (args.kind === 'windowgone' && args.target === undefined) {
+        throw new Error('wait_for kind "windowgone" needs target (the window that should disappear)')
+      }
+      if (args.kind === 'text') {
+        if (args.target === undefined) throw new Error('wait_for kind "text" needs target (the window whose text is read)')
+        if (args.value === undefined || args.value.length === 0) throw new Error('wait_for kind "text" needs a non-empty value (the substring to look for in the window text)')
+      }
       const request: Record<string, unknown> = { cmd: 'waitfor', kind: args.kind }
       if (args.value !== undefined) request.value = args.value
+      if (args.target !== undefined) request.target = args.target
+      if (args.name !== undefined) request.name = args.name
+      if (args.type !== undefined) request.type = args.type
+      if (args.automationId !== undefined) request.automationId = args.automationId
+      if (args.className !== undefined) request.className = args.className
       if (args.x !== undefined) request.x = args.x
       if (args.y !== undefined) request.y = args.y
       if (args.width !== undefined) request.width = args.width
