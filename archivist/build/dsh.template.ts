@@ -38,6 +38,7 @@ function toDshParameters(schema: {
 }
 
 export function apply(ctx: Context): void {
+  setHost('dsh')   // 失败自动上报时标清来源宿主
   for (const tool of TOOLS) {
     ctx.tools.register(defineTool({
       name: tool.name,

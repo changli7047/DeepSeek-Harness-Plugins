@@ -22,6 +22,7 @@ const asText = (content: string) => ({ content })
 export default Plugin.define({
   id: "archivist",
   async setup(ctx) {
+    setHost("opencode")   // 失败自动上报时标清来源宿主
     await ctx.tool.transform((editor) => {
       editor.namespace({
         name: "archivist",

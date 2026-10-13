@@ -5,10 +5,11 @@
 import {
   initWorkspace, attachWorkspace, listSources, writePage, readPages, searchWiki,
   lintWiki, appendLog, readLog, estimateTokens, statusWorkspace, backupWorkspace,
-  commitWorkspace, parsePage, rebuildIndex, scanCorpus, runTool, TOOLS,
+  commitWorkspace, parsePage, rebuildIndex, scanCorpus, runTool, TOOLS, reportBug,
 } from './core/archivist.mjs'
 import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
 import { spawnSync } from 'node:child_process'
+import http from 'node:http'
 import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -16,6 +17,8 @@ import { fileURLToPath } from 'node:url'
 const ws = path.join(os.tmpdir(), 'archivist-smoke-' + Date.now())
 const cleanupPaths = [ws]
 process.env.ARCHIVIST_POINTER = path.join(os.tmpdir(), 'archivist-smoke-pointer.json')
+// 自检里有大量"故意失败"的调用：默认关掉 BUG 上报，免得灌满生产库（只在专门那组里临时打开）。
+process.env.ARCHIVIST_BUG_REPORT = '0'
 let pass = 0, fail = 0, skipped = 0
 const ok = (name, cond, extra = '') => {
   if (cond) { pass++; console.log('PASS ' + name) }
@@ -928,6 +931,104 @@ try {
   const logBeforeZero = readFileSync(logAbs, 'utf8')
   const readZero = String(TOOLS.find((t) => t.name === 'archivist_log').run({ workspace: ws, read: 0 }))
   ok('log read:0 reads instead of appending', readFileSync(logAbs, 'utf8') === logBeforeZero && !readZero.startsWith('logged:'), readZero)
+
+  // 20. 工具失败自动上报（post_bug）：用本地假服务器验证，全程不碰外网
+  {
+    const received = []
+    let delayMs = 0
+    let mode = 201
+    const srv = http.createServer((req, res) => {
+      let body = ''
+      req.on('data', (c) => { body += c })
+      req.on('end', () => {
+        received.push({ method: req.method, url: req.url, ctype: req.headers['content-type'], body, at: Date.now() })
+        const reply = () => {
+          if (mode === 503) {
+            res.writeHead(503, { 'Content-Type': 'application/json', 'Retry-After': '0' })
+            res.end(JSON.stringify({ ok: false, error: '服务繁忙：并发已达上限，请稍后重试' }))
+          } else {
+            res.writeHead(201, { 'Content-Type': 'application/json' })
+            res.end(JSON.stringify({ ok: true, id: received.length, created_at: 'x', status: 'open', severity: 'normal', title: 't' }))
+          }
+        }
+        if (delayMs) setTimeout(reply, delayMs); else reply()
+      })
+    })
+    await new Promise((r) => srv.listen(0, '127.0.0.1', r))
+    const endpoint = `http://127.0.0.1:${srv.address().port}/api/bugs`
+    const waitFor = async (n) => { for (let i = 0; i < 60 && received.length < n; i++) await new Promise((r) => setTimeout(r, 50)) }
+
+    const statusToolForBug = TOOLS.find((t) => t.name === 'archivist_status')
+    try {
+      // ① 失败必须上报一次，且原始错误照常抛出
+      process.env.ARCHIVIST_BUG_REPORT = '1'
+      process.env.ARCHIVIST_BUG_ENDPOINT = endpoint
+      let threwMsg = ''
+      try { runTool(statusToolForBug, { workspace: ws, bogusParam: 1 }) } catch (e) { threwMsg = e.message }
+      await waitFor(1)
+      const rep = received[0]
+      const p = rep ? JSON.parse(rep.body) : {}
+      ok('bug report: a failing tool call posts once to /api/bugs as JSON',
+        received.length === 1 && rep.method === 'POST' && rep.url === '/api/bugs'
+          && (rep.ctype || '').startsWith('application/json'), JSON.stringify({ n: received.length, ct: rep?.ctype }))
+      ok('bug report: the original error still propagates unchanged',
+        threwMsg.includes('unknown parameter'), threwMsg)
+      ok('bug report: payload carries source/version/title/logs/tags/context',
+        p.source === 'archivist-plugin' && !!p.version && String(p.title).startsWith('[archivist/')
+          && !!p.logs && Array.isArray(p.tags) && p.tags[0] === 'tool-error'
+          && p.context?.tool === 'archivist_status' && ['normal', 'high'].includes(p.severity),
+        JSON.stringify({ source: p.source, title: p.title, tags: p.tags, ctx: p.context?.tool }))
+      ok('bug report: detail lists the tool, the error and the host',
+        String(p.detail).includes('archivist_status') && String(p.detail).includes('unknown parameter')
+          && String(p.detail).includes('主机'), String(p.detail).slice(0, 80))
+
+      // ② 成功的调用不上报
+      const before2 = received.length
+      runTool(statusToolForBug, { workspace: ws })
+      await new Promise((r) => setTimeout(r, 250))
+      ok('bug report: a successful tool call reports nothing', received.length === before2, 'delta=' + (received.length - before2))
+
+      // ③ fire-and-forget：服务端慢 800ms，失败调用必须立刻返回
+      delayMs = 800
+      const t0 = Date.now()
+      try { runTool(statusToolForBug, { workspace: ws, bogusParam: 1 }) } catch { /* expected */ }
+      const elapsed = Date.now() - t0
+      await waitFor(received.length + 1)
+      ok('bug report: reporting does not delay the caller (fire-and-forget)',
+        elapsed < 400 && received.length > before2, `elapsed=${elapsed}ms reports=${received.length}`)
+      delayMs = 0
+
+      // ④ 503 按文档等 Retry-After 后重试恰好一次
+      mode = 503
+      const before4 = received.length
+      await reportBug({ title: '[selftest] 503 retry' })
+      ok('bug report: 503 is retried exactly once, then gives up',
+        received.length === before4 + 2, `posts=${received.length - before4}`)
+      mode = 201
+
+      // ⑤ 服务端不可达：照样抛出原始错误、reportBug 返回 ok:false、不产生未处理拒绝
+      process.env.ARCHIVIST_BUG_ENDPOINT = 'http://127.0.0.1:1/api/bugs'
+      let threw5 = ''
+      try { runTool(statusToolForBug, { workspace: ws, bogusParam: 1 }) } catch (e) { threw5 = e.message }
+      const dead = await reportBug({ title: '[selftest] unreachable' })
+      ok('bug report: an unreachable endpoint is swallowed (ok:false, no throw)',
+        threw5.includes('unknown parameter') && dead.ok === false && !!dead.error, JSON.stringify(dead))
+
+      // ⑥ 关闭开关生效
+      process.env.ARCHIVIST_BUG_ENDPOINT = endpoint
+      process.env.ARCHIVIST_BUG_REPORT = '0'
+      const before6 = received.length
+      try { runTool(statusToolForBug, { workspace: ws, bogusParam: 1 }) } catch { /* expected */ }
+      const off = await reportBug({ title: '[selftest] disabled' })
+      await new Promise((r) => setTimeout(r, 200))
+      ok('bug report: ARCHIVIST_BUG_REPORT=0 disables reporting entirely',
+        received.length === before6 && off.ok === false && String(off.error).includes('disabled'), JSON.stringify(off))
+    } finally {
+      delete process.env.ARCHIVIST_BUG_REPORT      // 回到"默认开"，但自检后续不再触发失败调用
+      delete process.env.ARCHIVIST_BUG_ENDPOINT
+      await new Promise((r) => srv.close(r))
+    }
+  }
 
   console.log(`\n${pass} passed, ${fail} failed${skipped ? `, ${skipped} skipped` : ''}`)
   process.exitCode = fail ? 1 : 0
