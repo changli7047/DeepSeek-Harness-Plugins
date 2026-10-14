@@ -10,8 +10,24 @@ node windows-tools/tests/run.mjs
 - 汇总行**永远显式打印四类**：`passed / failed / skipped / inconclusive` —— 不许静默绿。
 - 快跑单组：`WT_ONLY=element,window node windows-tools/tests/run.mjs`。
 - 不是全绿时 scratch 目录会保留并打印路径（截图、构建副本、夹具描述符、激活日志都在里面）。
-- `DSH_REPO=<dsh 检出>` 时额外跑 dsh 装载冒烟（假 ctx 调 `apply()`，断言 17 个工具）；未设则 SKIP。
+- `DSH_REPO=<dsh 检出>` 时额外跑 dsh 装载冒烟（假 ctx 调 `apply()`，断言 14 个工具）；未设则 SKIP。
 - 每次运行都打印**夹具最长前台占用秒数**（目标 < 1s）——这是测试脚手架对用户的交代。
+
+## 严格后台模式（v3 的硬规则，`strict` 组）
+
+用户口径：「所有操作必须在后台，不能影响用户」→ 边界＝**启动程序/激活窗口也禁**（剪贴板写入、窗口状态操作保留）。规则与断言一一对应：
+
+| 规则 | 套件里的断言 |
+|---|---|
+| R1 永不移动光标 | `strict/host-never-moves-the-cursor-or-requests-the-foreground`：`SetCursorPos`/`SetPhysicalCursorPos`/`mouse_event`/`SendInput` 在 host 源码、artifact、opencode 层命中 **0** |
+| R2 永不请求前台 | 同上：`SetForegroundWindow`/`SetActiveWindow`/`AttachThreadInput`/`BringWindowToTop`/`SwitchToThisWindow` 命中 **0** |
+| R3 不注入前台键鼠 | 同上（`SendInput`/`mouse_event` 为 0） |
+| R4 动类工具必须带 `window` | `strict/pointer-and-input-tools-require-a-window`：`click`/`scroll`/`shortcut`/`type` 缺 `window` 必须报错（判据＝错误文案含 `window`/`background`/`后台` 关键词） |
+| R5 前台开关全删 | `strict/foreground-opt-ins-are-gone`：`allowForeground` 在 artifact/opencode 命中 0；`uia-invoke-pattern`/`uia-value-pattern` 不再作为**取值**出现（注释里写"已删除"不算），且套件自己的 `STRATEGY_VALUES` 收缩为 `background-post / wm-settext / keystream` |
+| R6 去掉 ValuePattern 腿 | `strict/element-typing-fails-explicitly-on-wpf`（WPF 上元素输入**明确报错**且控件内容未变）+ `strict/element-typing-still-works-on-classic-win32`（Win32 上仍走 `wm-settext`/`keystream` 写入并回读）+ `hygiene/element-typing-has-no-value-pattern-leg-and-reports-activations`（静态：该函数内无 `ValuePattern`/`SetValue`/焦点 API；运行期：观测到激活仍必须上报，两个方向都判） |
+| R8 工具面 17→14 | `strict/tool-surface-is-14-without-move-drag-app`：artifact 里 `ctx.tools.register(` 恰好 **14**；`windows_move`/`windows_drag`/`windows_app` 在 artifact 与 opencode 层命中 0 |
+
+**静态审计找不到目标时（host 或函数改名）明确报"审计目标已改名/不存在"，绝不静默通过。**
 
 ## 三类"非通过"结果的区别
 
@@ -23,17 +39,18 @@ node windows-tools/tests/run.mjs
 
 `INCONCLUSIVE` 存在的理由：verifier 抓到过"全绿但不证明不抢前台"——夹具已在前台时，`activated` 断言走的是恒真的 else 分支。现在这类情形必须显式暴露，不许伪装成 pass。
 
-## 覆盖范围（7 组）
+## 覆盖范围（8 组）
 
 | 组 | 内容 |
 |---|---|
 | `basic` | `status` / `snapshot`（含 target 过滤）/ 后台截图（window 模式、区域、`.png`、已存在默认拒绝、`overwrite=true`） |
-| `element` | `find`（name / type / automationId、大小写不敏感、`ControlType.` 前缀、截断说明、无命中不是错误）、`element` 点击与输入、`read` 回读、`strategy`/`verified` 上报、经典 Win32 上的真实点击效果 |
+| `element` | `find`（name / type / automationId、大小写不敏感、`ControlType.` 前缀、截断说明、无命中不是错误）、`element` 点击、`read` 回读、`strategy`/`verified` 上报、经典 Win32 上的**确定性投递计数** |
 | `window` | `winop` 八个动作（每步用 `status` 独立核对矩形/状态/topmost；`move`/`resize` 按 ±2px 容差，并各有「容差内通过 / 超容差必须失败」的边界用例）、`procs`（默认只列可见有标题窗口 + `includeHidden` 超集）、`waitfor` 三个新 kind 的正例 + 超时反例 |
-| `errors` | 空 value、越界坐标、不存在的窗口、非法 action/mode/命令 —— 必须报错，静默兜底算失败 |
-| `hygiene` | 宿主两行自检；三条红线（不移动真实鼠标、不占前台、不碰用户真实截图目录）；截图 `prune`/`pruneKeep`；§20 静态+运行期判据 |
+| `errors` | 空 value、非法的前台 mouse 模式（`move`/`drag` 必须被拒）、不存在的窗口、非法 action/mode/命令 —— 必须报错，静默兜底算失败 |
+| `hygiene` | 宿主两行自检；红线（不移动真实鼠标、不占前台、不碰用户真实截图目录）；截图 `prune`/`pruneKeep`；元素输入链的静态+运行期判据 |
+| `strict` | **v3 严格后台**：R1–R3 静态审计（host + artifact + opencode 命中 0）、R4 缺 `window` 必须报错、R5 前台开关已删、R6 WPF 元素输入明确报错 / Win32 仍可写入回读、R8 工具面 = 14 |
 | `build` | 构建幂等（在 `%TEMP%` 副本里跑两次比哈希）+ 仓库产物与当前 host 同步 |
-| `dsh` | 生成物静态形状（17 注册 / 1 个 `apply`）+ env 门控装载冒烟 |
+| `dsh` | 生成物静态形状（14 注册 / 1 个 `apply`）+ env 门控装载冒烟 |
 
 ## 三条红线怎么被遵守和检查
 

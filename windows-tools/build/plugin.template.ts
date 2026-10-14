@@ -222,7 +222,7 @@ export function apply(ctx: Context): void {
 
   ctx.tools.register(defineTool({
     name: 'windows_snapshot',
-    description: 'Capture the desktop UI state for automation: virtual screen size, foreground window, visible windows, and the interactive element tree (buttons, edits, list items, menus, links, ...) of the foreground window, each with screen coordinates. Set `window` to capture a specific window by title substring instead. Coordinates are virtual-desktop pixels with origin at the top-left; pass them to windows_click / windows_move / windows_drag.',
+    description: 'Capture the desktop UI state for automation: virtual screen size, foreground window, visible windows, and the interactive element tree (buttons, edits, list items, menus, links, ...) of the foreground window, each with screen coordinates. Set `window` to capture a specific window by title substring instead. Coordinates are virtual-desktop pixels with origin at the top-left; windows_click takes CLIENT coordinates of the window you pass, so prefer windows_find plus an element selector when you want to act on a specific control.',
     parameters: {
       window: { type: 'string', description: 'Optional window target: title substring, process name, or PID; when set, the element tree of the matching top-level window is captured instead of the foreground window.' },
     },
@@ -385,14 +385,13 @@ export function apply(ctx: Context): void {
 
   ctx.tools.register(defineTool({
     name: 'windows_click',
-    description: 'Click a mouse button. Default: screen coordinates in virtual-desktop pixels, executed on the real desktop (moves the cursor and changes focus). With `window`: x, y are CLIENT coordinates of that window and the click is posted in the background without moving the mouse or changing focus — reliable for classic Win32 and Qt apps (including WeChat 4.x, whose message routing and encoding are handled automatically), but a posted click is NOT turned into an input event by WPF/WinUI (measured: eight variants — Post/Send, with and without WM_MOUSEMOVE, client or screen coordinates, with WM_MOUSEACTIVATE — none of them fired a WPF button handler), and Chromium/Electron apps may ignore synthetic clicks too. To actually fire an element in WPF/WinUI you must pass `allowForeground: true` with `element`, which may bring the target window to the foreground. Instead of x/y you may pass `element` together with `window`: the host locates the element with UI Automation and reports the element it hit plus the `strategy` it used. The default element strategy is `background-post` (a posted click at the centre of the element rectangle); UIA `uia-invoke-pattern` is attempted only with `allowForeground: true`. Click replies always end with `verified=false`: delivery of the message or the pattern call is observable, the application reacting to it is not.',
+    description: 'Click a mouse button by posting the message to one window. This plugin runs in strict background mode: `window` is required, the click is always posted to that window (x, y are CLIENT coordinates of it, the same space as the windows_screenshot image of that window), the cursor is never moved and no foreground input is ever injected. Instead of x/y you may pass `element` (also with `window`): the host locates the element with UI Automation and posts the click at the centre of its rectangle, reporting the targeted element, the point that was actually under that spot when the message was delivered, and `strategy=background-post`. Replies always end with `verified=false`: delivery of the message is observable, the application reacting to it is not. Known platform limits: a posted click is not turned into an input event by WPF/WinUI (measured: eight variants — Post/Send, with and without WM_MOUSEMOVE, client or screen coordinates, with WM_MOUSEACTIVATE — none of them fired a WPF button handler), and Chromium/Electron apps may ignore synthetic clicks; on those, the click can be delivered without the application reacting, and this plugin deliberately offers no foreground alternative.',
     parameters: {
-      x: { type: 'integer', description: 'Screen x coordinate of the click point (client x when window is set); required unless `element` is given.' },
-      y: { type: 'integer', description: 'Screen y coordinate of the click point (client y when window is set); required unless `element` is given.' },
-      button: { type: 'string', enum: ['left', 'right', 'double'], description: 'Which click to perform; defaults to a single left click. Only a left click can use uia-invoke-pattern.' },
-      window: { type: 'string', description: 'Optional window target: title substring, process name (e.g. Weixin), or PID. Posts the click to that window in the background (x, y are client coordinates, the same space as the windows_screenshot image of that window). Required when `element` is used.' },
-      element: elementSelectorSchema('Optional element to click instead of x/y; requires `window`. The response names the strategy: `background-post` (default, no focus change) or `uia-invoke-pattern` (only with allowForeground).'),
-      allowForeground: { type: 'boolean', description: 'Allow the element click to use UIA InvokePattern, which may bring the target window to the foreground; defaults to false, in which case the click is always posted in the background.' },
+      x: { type: 'integer', description: 'Client x coordinate of the click point in `window`; required unless `element` is given.' },
+      y: { type: 'integer', description: 'Client y coordinate of the click point in `window`; required unless `element` is given.' },
+      button: { type: 'string', enum: ['left', 'right', 'double'], description: 'Which click to perform; defaults to a single left click.' },
+      window: { type: 'string', required: true, description: 'Window target: title substring, process name (e.g. Weixin), or PID. The click is posted to that window in the background.' },
+      element: elementSelectorSchema('Optional element to click instead of x/y; requires `window`. The reply names the targeted element and `strategy=background-post`.'),
     },
     output: {
       schema: { type: 'string' },
@@ -401,65 +400,23 @@ export function apply(ctx: Context): void {
     timeoutMs: 15000,
     isConcurrencySafe: () => false,
     async execute(args) {
-      if (args.element !== undefined) {
-        if (args.window === undefined) throw new Error('clicking an element needs window (the target window to search in)')
-        const request: Record<string, unknown> = { cmd: 'mouse', mode: 'click', button: args.button ?? 'left', window: args.window, element: args.element }
-        if (args.allowForeground === true) request.allowForeground = true
-        return callHost(request, 15000)
+      if (args.window === undefined) {
+        throw new Error('this plugin runs in strict background mode: windows_click needs window (title substring, process name, or PID) because the click is posted to that window; there is no foreground fallback')
       }
-      if (args.x === undefined || args.y === undefined) throw new Error('click needs x and y, or an element selector with window')
-      const request: Record<string, unknown> = { cmd: 'mouse', mode: 'click', x: args.x, y: args.y, button: args.button ?? 'left' }
-      if (args.window !== undefined) request.window = args.window
-      return callHost(request, 15000)
-    },
-  }))
-
-  ctx.tools.register(defineTool({
-    name: 'windows_move',
-    description: 'Move the mouse pointer to the given screen coordinates without pressing any button.',
-    parameters: {
-      x: { type: 'integer', required: true, description: 'Target screen x coordinate.' },
-      y: { type: 'integer', required: true, description: 'Target screen y coordinate.' },
-    },
-    output: {
-      schema: { type: 'string' },
-      render: (_args, value) => [{ type: 'text', text: value }],
-    },
-    timeoutMs: 15000,
-    isConcurrencySafe: () => false,
-    async execute(args) {
-      return callHost({ cmd: 'mouse', mode: 'move', x: args.x, y: args.y }, 15000)
-    },
-  }))
-
-  ctx.tools.register(defineTool({
-    name: 'windows_drag',
-    description: 'Drag with the left mouse button held: press at (fromX, fromY), move, and release at (x, y).',
-    parameters: {
-      fromX: { type: 'integer', required: true, description: 'Drag start screen x coordinate.' },
-      fromY: { type: 'integer', required: true, description: 'Drag start screen y coordinate.' },
-      x: { type: 'integer', required: true, description: 'Drag end screen x coordinate.' },
-      y: { type: 'integer', required: true, description: 'Drag end screen y coordinate.' },
-    },
-    output: {
-      schema: { type: 'string' },
-      render: (_args, value) => [{ type: 'text', text: value }],
-    },
-    timeoutMs: 15000,
-    isConcurrencySafe: () => false,
-    async execute(args) {
-      return callHost({ cmd: 'mouse', mode: 'drag', fromX: args.fromX, fromY: args.fromY, x: args.x, y: args.y }, 15000)
+      if (args.element !== undefined) {
+        return callHost({ cmd: 'mouse', mode: 'click', button: args.button ?? 'left', window: args.window, element: args.element }, 15000)
+      }
+      if (args.x === undefined || args.y === undefined) throw new Error('windows_click needs x and y (client coordinates of window), or element together with window')
+      return callHost({ cmd: 'mouse', mode: 'click', x: args.x, y: args.y, button: args.button ?? 'left', window: args.window }, 15000)
     },
   }))
 
   ctx.tools.register(defineTool({
     name: 'windows_scroll',
-    description: 'Scroll the mouse wheel vertically by `amount` wheel clicks (positive scrolls up, negative scrolls down) and report the UI element under the pointer, so you can confirm the scroll target. With `window` the scroll is posted to that window in the background (no cursor movement).',
+    description: 'Scroll the mouse wheel inside one window by posting wheel messages to it: `amount` wheel clicks, positive scrolls up and negative scrolls down. This plugin runs in strict background mode, so `window` is required and the pointer is never moved; the scroll is delivered to that window and the application decides whether it reacts.',
     parameters: {
       amount: { type: 'integer', required: true, description: 'Number of wheel clicks; negative values scroll down.' },
-      x: { type: 'integer', description: 'Optional screen x coordinate to move the pointer to before scrolling.' },
-      y: { type: 'integer', description: 'Optional screen y coordinate to move the pointer to before scrolling.' },
-      window: { type: 'string', description: 'Optional window title substring, process name, or PID; posts the scroll to that window in the background.' },
+      window: { type: 'string', required: true, description: 'Window target: title substring, process name, or PID; the scroll is posted to that window in the background.' },
     },
     output: {
       schema: { type: 'string' },
@@ -469,26 +426,21 @@ export function apply(ctx: Context): void {
     isConcurrencySafe: () => false,
     async execute(args) {
       if (args.amount === 0) throw new Error('scroll amount must not be zero')
-      const request: Record<string, unknown> = { cmd: 'mouse', mode: 'scroll', amount: args.amount }
-      if (args.x !== undefined && args.y !== undefined) {
-        request.x = args.x
-        request.y = args.y
+      if (args.window === undefined) {
+        throw new Error('this plugin runs in strict background mode: windows_scroll needs window (title substring, process name, or PID) because the wheel messages are posted to that window; there is no foreground fallback')
       }
-      if (args.window !== undefined) request.window = args.window
-      return callHost(request, 15000)
+      return callHost({ cmd: 'mouse', mode: 'scroll', amount: args.amount, window: args.window }, 15000)
     },
   }))
 
   ctx.tools.register(defineTool({
     name: 'windows_type',
-    description: "Type text into the focused control with exact Unicode input (spaces, punctuation, CJK and symbols are preserved). After typing, the focused control is read back and the call fails if the text did not land. Mode 'keys' (default) synthesizes per-character Unicode input; mode 'paste' uses the clipboard for bulk text. Set `clear` to select all (Ctrl+A) first; set `activate` to bring a window forward atomically before typing. With `window`, the text is posted to that window in the background (no focus change, `clear` is ignored) — best-effort: ASCII is reliable; CJK is reliable for classic Win32 and Qt apps including WeChat 4.x (byte encoding handled automatically) but may be garbled or dropped by modern WinUI/UWP apps, so prefer foreground mode with `activate` there. With `element` (plus `window` as the search root) the text goes to that element through a fixed fallback chain, and every response ends with `[strategy=<leg>] [verified=<true|false>]`: `uia-value-pattern` (UI Automation ValuePattern), then `wm-settext` (WM_SETTEXT to the element's native window handle), then `keystream` (the plain background character stream). Classic Win32 and Qt apps expose no ValuePattern, so they land on `wm-settext` or `keystream`. `verified=true` only when the text could be read back from the element; the background and element paths never touch the clipboard (only an explicit foreground `mode: 'paste'` writes it). The host layer contains no SetForegroundWindow/SetActiveWindow, but the target application's own UI Automation provider may still bring its window forward: on WPF the element path can do that (reproduced in three independent comparisons — 3 of 28 element writes, against 0 of 32 control writes), and the reply then carries `activated=true` instead of staying silent about it. Do not assume the element path leaves the foreground untouched.",
+    description: "Post text to one window in the background with exact Unicode input (spaces, punctuation, CJK and symbols are preserved). This plugin runs in strict background mode: `window` is required, the text is posted to that window, and no foreground key or clipboard input is ever injected. With `element` (plus `window` as the search root) the text is written to that element through the remaining background legs, and every reply ends with `[strategy=<leg>] [verified=<true|false>]`: `wm-settext` (WM_SETTEXT to the element's native window handle), then `keystream` (the background character stream posted to that handle). The UIA ValuePattern leg was removed because on WPF it can bring the target window to the foreground, so an element without a native window handle (for example a WPF TextBox) is refused with an explanation instead of failing silently. `verified=true` only when the text could be read back from the element; the clipboard is never written by this tool, and `clear` cannot replace a selection in the background paths. Known limits: classic Win32 and Qt apps accept posted text (WeChat 4.x byte encoding is handled automatically); WPF/WinUI do not turn posted input into input events, and WinUI/UWP apps may garble CJK.",
     parameters: {
-      text: { type: 'string', required: true, description: 'The text to type into the focused control.' },
-      clear: { type: 'boolean', description: 'Select all existing content (Ctrl+A) before typing; defaults to false. Ignored by the background and keystream paths, which cannot replace a selection.' },
-      mode: { type: 'string', enum: ['keys', 'paste'], description: "Input method; defaults to 'keys' (exact per-character Unicode input). 'paste' is faster for large text and is the only path that writes the clipboard." },
-      activate: { type: 'string', description: 'Optional window title substring, process name, or PID to activate first, in the same call.' },
-      window: { type: 'string', description: 'Optional window target: title substring, process name (e.g. Weixin), or PID. Posts the text to that window in the background instead of the focused control. Required when `element` is used.' },
-      element: elementSelectorSchema('Optional element to type into instead of the focused control; requires `window`. The response names the strategy leg that carried the text, whether it could be read back, and `activated=true` when the target window ended up in the foreground.'),
+      text: { type: 'string', required: true, description: 'The text to post to `window`.' },
+      clear: { type: 'boolean', description: 'Ignored in strict background mode: posted characters cannot replace an existing selection.' },
+      window: { type: 'string', required: true, description: 'Window target: title substring, process name (e.g. Weixin), or PID. The text is posted to that window in the background.' },
+      element: elementSelectorSchema('Optional element to write into instead of the window-level character stream; requires `window`. The reply names the strategy leg that carried the text, whether it could be read back, and `activated=true` if the target window ended up in the foreground.'),
     },
     output: {
       schema: { type: 'string' },
@@ -498,10 +450,10 @@ export function apply(ctx: Context): void {
     isConcurrencySafe: () => false,
     async execute(args) {
       if (args.text.length === 0) throw new Error('text must not be empty')
-      if (args.element !== undefined && args.window === undefined) throw new Error('typing into an element needs window (the target window to search in)')
-      const request: Record<string, unknown> = { cmd: 'type', text: args.text, clear: args.clear === true, mode: args.mode ?? 'keys' }
-      if (args.activate !== undefined) request.activate = args.activate
-      if (args.window !== undefined) request.window = args.window
+      if (args.window === undefined) {
+        throw new Error('this plugin runs in strict background mode: windows_type needs window (title substring, process name, or PID) because the text is posted to that window; there is no foreground fallback')
+      }
+      const request: Record<string, unknown> = { cmd: 'type', text: args.text, clear: args.clear === true, window: args.window }
       if (args.element !== undefined) request.element = args.element
       return callHost(request, 30000)
     },
@@ -509,11 +461,10 @@ export function apply(ctx: Context): void {
 
   ctx.tools.register(defineTool({
     name: 'windows_shortcut',
-    description: "Press a keyboard shortcut, for example 'ctrl+s', 'alt+tab', 'ctrl+shift+esc', or a single key like 'win', 'enter', 'esc'. Set `activate` to bring a window forward first, in the same call, so the shortcut cannot land in another window. With `window`, the key messages are posted to that window in the background (no focus change) — best-effort: classic Win32 apps accept them, Chromium/Electron apps may ignore some. Supported names: ctrl, alt, shift, win, a-z, 0-9, f1-f12, enter, tab, esc, space, backspace, delete, insert, up, down, left, right, home, end, pageup, pagedown, minus, equal, comma, period, slash.",
+    description: "Post a keyboard shortcut to one window, for example 'ctrl+s', 'alt+tab' or a single key like 'enter'. This plugin runs in strict background mode, so `window` is required: the key messages are posted to that window and no foreground keys are ever injected. Best-effort: classic Win32 apps accept them, while Chromium/Electron and WPF/WinUI apps may ignore some or all of them. Supported names: ctrl, alt, shift, win, a-z, 0-9, f1-f12, enter, tab, esc, space, backspace, delete, insert, up, down, left, right, home, end, pageup, pagedown, minus, equal, comma, period, slash.",
     parameters: {
       keys: { type: 'string', required: true, description: "Keys joined with '+', pressed in order and released in reverse, e.g. 'ctrl+alt+delete'." },
-      activate: { type: 'string', description: 'Optional window title substring, process name, or PID to activate first, in the same call.' },
-      window: { type: 'string', description: 'Optional window title substring, process name, or PID; posts the keys to that window in the background instead of the focused window.' },
+      window: { type: 'string', required: true, description: 'Window target: title substring, process name, or PID; the keys are posted to that window in the background.' },
     },
     output: {
       schema: { type: 'string' },
@@ -522,38 +473,16 @@ export function apply(ctx: Context): void {
     timeoutMs: 20000,
     isConcurrencySafe: () => false,
     async execute(args) {
-      const request: Record<string, unknown> = { cmd: 'keys', keys: args.keys }
-      if (args.activate !== undefined) request.activate = args.activate
-      if (args.window !== undefined) request.window = args.window
-      return callHost(request, 20000)
-    },
-  }))
-
-  ctx.tools.register(defineTool({
-    name: 'windows_app',
-    description: 'Launch an application, document, or URL (action launch, ShellExecute semantics, optional args; reports the new window title when one appears), or bring an existing window to the foreground (action activate; target is a window title substring, process name, or PID; minimized windows are restored).',
-    parameters: {
-      action: { type: 'string', enum: ['launch', 'activate'], required: true, description: 'launch starts something new; activate focuses an existing window.' },
-      target: { type: 'string', required: true, description: 'Executable path, document, or URL for launch; window title substring, process name, or PID for activate.' },
-      args: { type: 'string', description: 'Optional command line arguments for launch.' },
-    },
-    output: {
-      schema: { type: 'string' },
-      render: (_args, value) => [{ type: 'text', text: value }],
-    },
-    timeoutMs: 15000,
-    isConcurrencySafe: () => false,
-    async execute(args) {
-      if (args.action === 'activate') return callHost({ cmd: 'activate', target: args.target }, 15000)
-      const request: Record<string, unknown> = { cmd: 'launch', target: args.target }
-      if (args.args !== undefined) request.args = args.args
-      return callHost(request, 15000)
+      if (args.window === undefined) {
+        throw new Error('this plugin runs in strict background mode: windows_shortcut needs window (title substring, process name, or PID) because the keys are posted to that window; there is no foreground fallback')
+      }
+      return callHost({ cmd: 'keys', keys: args.keys, window: args.window }, 20000)
     },
   }))
 
   ctx.tools.register(defineTool({
     name: 'windows_window',
-    description: 'Move, resize, minimize, maximize, restore, close or pin a window, and report the rectangle and state measured AFTER the operation. These actions do not request the foreground: move/resize/topmost use SetWindowPos with SWP_NOACTIVATE, minimize/maximize/restore use ShowWindow, close posts WM_CLOSE, and the layer contains no SetForegroundWindow/SetActiveWindow. That is not a promise that no window reaches the foreground: minimizing a window that is currently foreground hands the foreground to the next window in Z order (Windows semantics), and a target application can activate its own window by itself. The cursor is not moved by these calls. An action is reported as successful only when the fresh measurement agrees with the request — move/resize allow a 2 px rounding slack for DPI-scaled windows (farther off still fails), and the reply always carries the measured rectangle rather than an echo of the request. Consequences worth knowing: moving or resizing a minimized window cannot take effect (restore it first), and `close` waits up to 1.5 s and fails if the window is still there, e.g. because it is showing a confirmation dialog. There is deliberately no activate/focus action — use windows_app with action "activate" for that.',
+    description: 'Move, resize, minimize, maximize, restore, close or pin a window, and report the rectangle and state measured AFTER the operation. These actions do not request the foreground: move/resize/topmost use SetWindowPos with SWP_NOACTIVATE, minimize/maximize/restore use ShowWindow, close posts WM_CLOSE, and the layer contains no foreground-request call at all (this plugin runs in strict background mode). That is not a promise that no window reaches the foreground: minimizing a window that is currently foreground hands the foreground to the next window in Z order (Windows semantics), and a target application can activate its own window by itself. The cursor is not moved by these calls. An action is reported as successful only when the fresh measurement agrees with the request — move/resize allow a 2 px rounding slack for DPI-scaled windows (farther off still fails), and the reply always carries the measured rectangle rather than an echo of the request. Consequences worth knowing: moving or resizing a minimized window cannot take effect (restore it first), and `close` waits up to 1.5 s and fails if the window is still there, e.g. because it is showing a confirmation dialog. There is deliberately no activate/focus action: this plugin runs in strict background mode and leaves bringing a window to the front to the user.',
     parameters: {
       action: { type: 'string', enum: ['move', 'resize', 'minimize', 'maximize', 'restore', 'close', 'topmost'], required: true, description: 'Operation to perform.' },
       target: { type: 'string', required: true, description: 'Window target: title substring, process name, or PID.' },

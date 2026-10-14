@@ -431,19 +431,31 @@ export default {
 
     {
       id: 'window/waitfor-text-source-matches-read',
-      title: 'wait_for text and read agree on the text source',
+      title: 'wait_for text and read agree on the text source (both directions)',
       async run(ctx) {
         const fixture = await ctx.fixture()
-        const marker = `m-${fixture.tag}`
-        await ctx.host().ok({ cmd: 'type', window: fixture.baseTitle, element: { automationId: fixture.textBoxId }, text: marker })
-        const readBack = await ctx.host().ok({ cmd: 'read', target: fixture.baseTitle })
-        ctx.check.contains(readBack, marker, 'read sees the freshly typed marker', JSON.stringify(readBack.slice(0, 200)))
-        const out = await ctx.host().ok(
-          { cmd: 'waitfor', kind: 'text', target: fixture.baseTitle, value: marker, timeoutSeconds: 3 },
-          { timeoutMs: 15000 },
+        // Under v3 R6 there is no way to *write* into a WPF element any more, so this case
+        // proves source equality without writing: read() says what the window contains, and
+        // wait_for kind=text must agree with it in both directions.
+        const readBack = (await ctx.host().ok({ cmd: 'read', target: fixture.baseTitle })).trim()
+        ctx.check.ok(readBack.length > 0, 'read returns the window text', JSON.stringify(readBack.slice(0, 120)))
+        const present = readBack.slice(0, 12)
+        const absent = `absent-${fixture.tag}`
+        ctx.check.ok(!readBack.includes(absent), 'the control value used for the negative probe is not in the read text')
+
+        const hit = await ctx.host().ok(
+          { cmd: 'waitfor', kind: 'text', target: fixture.baseTitle, value: present, timeoutSeconds: 5 },
+          { timeoutMs: 20000 },
         )
-        ctx.check.match(out, /condition met/i, 'the same marker is a text-wait hit', out.slice(0, 300))
-        ctx.check.ok(elapsedOf(out) !== null, 'the hit reports how long it waited', out.slice(0, 200))
+        ctx.check.match(hit, /condition met/i, 'text that read() sees is a hit for wait_for', hit.slice(0, 300))
+        ctx.check.ok(elapsedOf(hit) !== null, 'the hit reports how long it waited', hit.slice(0, 200))
+
+        // The mirror direction: text that read() does NOT contain must time out.
+        await ctx.check.fails(
+          () => ctx.host().ok({ cmd: 'waitfor', kind: 'text', target: fixture.baseTitle, value: absent, timeoutSeconds: 1 }, { timeoutMs: 20000 }),
+          'text that read() does not see is a timeout for wait_for',
+          { expect: 'timed out' },
+        )
       },
     },
   ],

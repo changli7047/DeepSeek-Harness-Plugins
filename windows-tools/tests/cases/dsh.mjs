@@ -20,14 +20,13 @@ import { WT_DIR, ensureDir } from '../lib/host.mjs'
 import { Skip } from '../lib/checks.mjs'
 
 export const TOOL_NAMES = [
-  'windows_status', 'windows_snapshot', 'windows_screenshot', 'windows_click', 'windows_move',
-  'windows_drag', 'windows_scroll', 'windows_type', 'windows_shortcut', 'windows_app',
-  'windows_clipboard', 'windows_wait', 'windows_wait_for',
+  'windows_status', 'windows_snapshot', 'windows_screenshot', 'windows_click', 'windows_scroll',
+  'windows_type', 'windows_shortcut', 'windows_clipboard', 'windows_wait', 'windows_wait_for',
   'windows_find', 'windows_read', 'windows_window', 'windows_process',
 ]
 
 const ARTIFACT = join(WT_DIR, 'dsh', 'windows-tools.ts')
-const EXPECTED_TOOLS = 17
+const EXPECTED_TOOLS = 14
 
 function artifactSource() {
   return readFileSync(ARTIFACT, 'utf8')

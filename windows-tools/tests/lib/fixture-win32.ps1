@@ -118,6 +118,17 @@ $script:probe.Location = New-Object System.Drawing.Point 20, 90
 $script:probe.Size = New-Object System.Drawing.Size 220, 60
 $script:probe.BackColor = [System.Drawing.Color]::LightSteelBlue
 $form.Controls.Add($script:probe)
+
+# A real Edit control: it has a native handle, so the strict-background element typing leg
+# (wm-settext) can still write into it and `read` can read it back (v3 R6).
+$txt = New-Object System.Windows.Forms.TextBox
+$txt.Name = 'txtInput'
+$txt.AccessibleName = ('Edit-' + $Tag)
+$txt.Text = ('seed-' + $Tag)
+$txt.Location = New-Object System.Drawing.Point 20, 162
+$txt.Size = New-Object System.Drawing.Size 260, 24
+$form.Controls.Add($txt)
+$form.ClientSize = New-Object System.Drawing.Size 420, 220
 $form.Add_Closed({ $script:closing = $true })
 $form.Show()
 [System.Windows.Forms.Application]::DoEvents()
@@ -201,6 +212,9 @@ $info = [ordered]@{
   buttonName  = ('Go-' + $Tag)
   probeId     = 'probeArea'
   probeName   = ('Probe-' + $Tag)
+  textBoxId   = 'txtInput'
+  textBoxName = ('Edit-' + $Tag)
+  seed        = ('seed-' + $Tag)
   markerPath  = $MarkerPath
   counterPath = $script:CounterPath
   activatedLog = $script:actLog

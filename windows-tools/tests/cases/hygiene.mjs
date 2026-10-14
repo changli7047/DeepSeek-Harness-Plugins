@@ -95,7 +95,9 @@ export default {
         const guard = await cursorGuard(ctx, async () => {
           await ctx.host().ok({ cmd: 'find', target: fixture.baseTitle, automationId: fixture.buttonId })
           await ctx.host().ok({ cmd: 'read', target: fixture.baseTitle })
-          await ctx.host().ok({ cmd: 'type', window: fixture.baseTitle, element: { automationId: fixture.textBoxId }, text: `cursor-${fixture.tag}` })
+          // Element typing on WPF is an explicit error under v3 R6, so the allowed background
+          // input path here is the window-level character stream (`type` with `window` only).
+          await ctx.host().ok({ cmd: 'type', window: fixture.baseTitle, text: `cursor-${fixture.tag}` })
           await ctx.host().ok({ cmd: 'winop', target: fixture.baseTitle, action: 'move', x: 210, y: 150 })
           await ctx.host().ok({ cmd: 'screenshot', window: fixture.baseTitle, path: join(ctx.scratch, 'shots', 'hygiene-cursor.png') })
         }, 'the cursor is identical across a full background sequence')
@@ -104,28 +106,32 @@ export default {
     },
 
     {
-      id: 'hygiene/type-element-leg-activations-are-reported',
-      title: 'the type element leg asks for no focus, and any activation it causes is reported (v2 §20)',
+      id: 'hygiene/element-typing-has-no-value-pattern-leg-and-reports-activations',
+      title: 'v3 R6: the element-typing chain has no ValuePattern leg, asks for no focus, and still reports any activation',
       async run(ctx) {
         const fixture = await ctx.fixture()
 
-        // (1) Static half of §20: the audited leg must contain no focus API at all. WPF's
-        // UIA provider sometimes activates the window inside ValuePattern.SetValue, which
-        // the host cannot prevent — but it must never *ask* for the foreground.
+        // (1) Static: the ValuePattern leg is what could activate a WPF window, so it must
+        // be gone from the source; and the function must still contain no focus API.
         const source = readFileSync(HOST_PS1, 'utf8')
         const body = functionBody(source, 'Invoke-WtElementType')
-        ctx.check.ok(body !== null, 'the audited type-element function exists in the host source', 'Invoke-WtElementType not found — update this check if it was renamed')
+        ctx.check.ok(body !== null, 'the audited element-typing function exists in the host source', 'Invoke-WtElementType not found — if it was renamed, update this audit (it must not silently pass)')
         if (body !== null) {
+          // Code usage, not prose: the function may *explain* that the ValuePattern leg was
+          // removed (T11's refusal message does exactly that), but it must not call it. So
+          // the audit looks for call sites and for the removed strategy literal.
+          for (const token of ['TryGetCurrentPattern', 'SetValue(', 'uia-value-pattern']) {
+            ctx.check.ok(!body.includes(token), `Invoke-WtElementType never uses ${token}`, `${token} still appears in the audited function`)
+          }
           ctx.check.ok(
-            !/(SetFocus|SetForegroundWindow|ShowWindow|AttachThreadInput|BringWindowToTop|SetActiveWindow)/.test(body),
+            !/(SetFocus|SetForegroundWindow|SetActiveWindow|ShowWindow|AttachThreadInput|BringWindowToTop|SwitchToThisWindow)/.test(body),
             'Invoke-WtElementType contains no focus/activation API',
-            body.split(/\r?\n/).filter((line) => /SetFocus|SetForegroundWindow|ShowWindow|AttachThreadInput|BringWindowToTop|SetActiveWindow/.test(line)).join('\n'),
+            body.split(/\r?\n/).filter((line) => /SetFocus|SetForegroundWindow|SetActiveWindow|ShowWindow|AttachThreadInput|BringWindowToTop|SwitchToThisWindow/.test(line)).join('\n'),
           )
         }
 
-        // (2) Runtime half: read-only / non-activating operations must not activate the
-        // window at all. The fixture logs its own IsActive transitions, so this is local
-        // truth and does not depend on what the rest of the desktop is doing.
+        // (2) Runtime: read-only / non-activating operations must not activate the window.
+        // The fixture logs its own system-foreground transitions, so this is local truth.
         if (fixtureIsActive(fixture.activatedLog)) {
           throw new Inconclusive('the test window was already in the foreground at case start, so "did this call activate it?" cannot be judged (INCONCLUSIVE, not a pass)')
         }
@@ -138,70 +144,48 @@ export default {
         for (const [name, request] of quiet) {
           const before = fixtureIsActive(fixture.activatedLog)
           await ctx.host().ok(request, { timeoutMs: 30000 })
-          await sleep(500) // the fixture polls IsActive every 200 ms
+          await sleep(500) // the fixture polls the foreground every 200 ms
           if (!before && fixtureIsActive(fixture.activatedLog)) surprises.push(name)
         }
         ctx.check.ok(surprises.length === 0, 'find / wait_for / screenshot never activate the test window', surprises.join(', '))
 
-        // (3) The type element leg may activate the window (platform behaviour, ~1/10 per
-        // call). That is accepted — but it must be *reported*. Attribution follows the
-        // host's own observation window (v2 §20): the receipt covers
-        // [write start, write end + 250 ms], so an activation outside it belongs to nobody
-        // and must NOT be counted (round-level attribution produced exactly that false red).
-        //
-        // Because a single attempt usually misses, the case retries: the positive branch
-        // (observed activation ⇒ activated=true) is only *covered* once a hit happens. If
-        // 20 attempts all miss, the case is INCONCLUSIVE — never a pass, because the branch
-        // that matters was never exercised.
-        const attempts = 20
-        let coveredAt = null
-        const unobservable = []
-        for (let attempt = 1; attempt <= attempts; attempt++) {
-          if (fixtureIsActive(fixture.activatedLog)) {
-            throw new Inconclusive(`the test window was in the foreground before attempt ${String(attempt)}; a fresh activation cannot be judged`)
+        // (3) The remaining element-typing legs (wm-settext / keystream) have no obligation to
+        // report an activation — but if one is observed it must still be reported honestly
+        // (v3 §3). The Win32 fixture is the target here, because element typing on WPF is now
+        // an explicit error (asserted in cases/strict-background.mjs). Both directions are
+        // judged whenever the observation is possible, so this never needs INCONCLUSIVE:
+        // these legs are not required to activate anything.
+        const win32 = await ctx.fixtureWin32()
+        let observed = 0
+        const mismatches = []
+        for (let attempt = 1; attempt <= 5; attempt++) {
+          if (fixtureIsActive(win32.activatedLog)) {
+            ctx.log(`attempt ${String(attempt)}: the Win32 fixture is already in the foreground; skipping this attempt`)
+            continue
           }
-          const pre = readActivationLog(fixture.activatedLog)
+          const pre = readActivationLog(win32.activatedLog)
           const t0 = secondsOfDay(Date.now())
-          const receipt = await ctx.host().ok({ cmd: 'type', window: fixture.baseTitle, element: { automationId: fixture.textBoxId }, text: `focus-${fixture.tag}-${String(attempt)}` }, { timeoutMs: 30000 })
+          const receipt = await ctx.host().ok(
+            // Classic Win32 children expose their *content* as the UIA name, so the Edit is
+            // selected by className here (same reason as in the strict group).
+            { cmd: 'type', window: win32.baseTitle, element: { className: 'EDIT' }, text: `act-${win32.tag}-${String(attempt)}` },
+            { timeoutMs: 30000 },
+          )
           const t1 = secondsOfDay(Date.now())
-          await sleep(350) // let the fixture's 200 ms polling flush anything it saw
-          const fresh = readActivationLog(fixture.activatedLog).slice(pre.length)
-          const rolledOver = t1 < t0 // midnight; skip the timestamp alignment rather than mis-attribute
+          await sleep(350)
+          const fresh = readActivationLog(win32.activatedLog).slice(pre.length)
+          const rolledOver = t1 < t0
           const inWindow = rolledOver ? [] : fresh.filter((e) => e.active && e.at >= t0 - 0.05 && e.at <= t1 + 0.05)
-          const outside = rolledOver ? [] : fresh.filter((e) => e.active && !(e.at >= t0 - 0.05 && e.at <= t1 + 0.05))
           const reported = activatedOf(receipt)
-
-          if (inWindow.length > 0 && !rolledOver) {
-            // How long did the scaffold actually hold the foreground? The scaffold hands it
-            // straight back (that is the whole point of the self-demotion), which can make
-            // the activation shorter than the host's 10 ms sampling interval — then it is
-            // physically unobservable, and a miss is not dishonesty.
-            const hitIndex = fresh.findIndex((e) => e.active)
-            let releaseAt = null
-            for (let k = hitIndex + 1; k < fresh.length; k++) {
-              if (!fresh[k].active) { releaseAt = fresh[k].at; break }
-            }
-            const heldMs = releaseAt === null ? null : (releaseAt - fresh[hitIndex].at) * 1000
-            if (reported === true) {
-              ctx.check.eq(reported, true, 'an activation inside the call\'s observation window is reported as activated=true', String(receipt).slice(0, 400))
-              ctx.log(`type element leg attempt ${String(attempt)}: observed=true reported=true (held ≈${heldMs === null ? '?' : heldMs.toFixed(0)} ms) — positive branch covered`)
-              coveredAt = attempt
-              break
-            }
-            if (heldMs !== null && heldMs < 15) {
-              unobservable.push(`attempt ${String(attempt)}: held ${heldMs.toFixed(0)} ms`)
-              continue
-            }
-            ctx.check.eq(reported, true, 'a reported-able activation is reported as activated=true', `held≈${heldMs === null ? '?' : heldMs.toFixed(0)} ms\n${String(receipt).slice(0, 400)}`)
-            coveredAt = attempt
-            break
+          if (inWindow.length > 0) {
+            observed++
+            if (reported !== true) mismatches.push(`attempt ${String(attempt)}: an activation happened inside the window but was not reported`)
+          } else if (reported === true && !rolledOver) {
+            mismatches.push(`attempt ${String(attempt)}: activated=true was claimed although nothing was activated inside the window`)
           }
-          if (outside.length > 0) ctx.log(`attempt ${String(attempt)}: ${String(outside.length)} activation(s) fell outside the host's observation window (not this call's responsibility)`)
-          ctx.check.ok(reported !== true, 'activated is not claimed when nothing was activated inside the window', `attempt ${String(attempt)} inWindow=${String(inWindow.length)} outside=${String(outside.length)}\n${String(receipt).slice(0, 400)}`)
         }
-        if (coveredAt === null) {
-          throw new Inconclusive(`positive branch not observed in ${String(attempts)} attempts; ${String(unobservable.length)} activation(s) were seen but each lasted under the host's 10 ms sampling interval (${unobservable.slice(0, 3).join('; ')}) so they could not be reported (INCONCLUSIVE, not a pass)`)
-        }
+        ctx.log(`element typing on Win32: ${String(observed)} activation(s) observed across 5 attempts, each must be reported`)
+        ctx.check.eq(mismatches.length, 0, 'observed activations are reported, and no activation is claimed when none happened', mismatches.join('\n'))
       },
     },
 

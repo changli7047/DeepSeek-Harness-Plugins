@@ -207,43 +207,10 @@ export default {
       },
     },
 
-    {
-      id: 'element/type-then-read-roundtrip',
-      title: 'element type reaches the control and can be read back',
-      async run(ctx) {
-        const fixture = await ctx.fixture()
-        const text = `typed-${fixture.tag}`
-        const out = await ctx.host().ok({ cmd: 'type', window: fixture.baseTitle, element: { automationId: fixture.textBoxId }, text })
-        ctx.check.ok(STRATEGY_VALUES.includes(strategyOf(out)), `type reports a documented strategy (got ${String(strategyOf(out))})`, out.slice(0, 300))
-        ctx.check.ok(verifiedOf(out) !== null, 'type reports a verified flag', out.slice(0, 300))
-        const readBack = await ctx.host().ok({ cmd: 'read', target: fixture.baseTitle })
-        ctx.check.contains(readBack, text, 'read returns the typed text', JSON.stringify(readBack.slice(0, 300)))
-      },
-    },
-
-    {
-      id: 'element/type-verified-matches-readback',
-      title: 'type does not claim verified=true when the text is not readable',
-      async run(ctx) {
-        const fixture = await ctx.fixture()
-        const text = `verify-${fixture.tag}`
-        const out = await ctx.host().ok({ cmd: 'type', window: fixture.baseTitle, element: { automationId: fixture.textBoxId }, text })
-        const verified = verifiedOf(out)
-        const readBack = await ctx.host().ok({ cmd: 'read', target: fixture.baseTitle })
-        const present = readBack.includes(text)
-        ctx.check.eq(verified, present, 'verified reflects what read() can actually see', `verified=${String(verified)} readable=${String(present)}\n${out.slice(0, 300)}`)
-      },
-    },
-
-    {
-      id: 'element/type-prefers-value-pattern-on-wpf',
-      title: 'element type uses the first available leg of the documented chain (WPF has ValuePattern)',
-      async run(ctx) {
-        const fixture = await ctx.fixture()
-        const out = await ctx.host().ok({ cmd: 'type', window: fixture.baseTitle, element: { automationId: fixture.textBoxId }, text: `chain-${fixture.tag}` })
-        ctx.check.eq(strategyOf(out), 'uia-value-pattern', 'the WPF fixture is typed through ValuePattern, the first documented leg', out.slice(0, 300))
-      },
-    },
+    // The three WPF element-typing cases that used to live here were removed by v3 R6:
+    // the `uia-value-pattern` leg is gone (it could activate the target window), so element
+    // typing on WPF is now an explicit error — covered by cases/strict-background.mjs, which
+    // also asserts the remaining legs still write into a classic Win32 Edit and read back.
 
     {
       id: 'element/click-delivers-to-a-win32-control',

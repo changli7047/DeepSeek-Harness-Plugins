@@ -14,17 +14,24 @@ export default {
   name: 'errors',
   cases: [
     {
-      id: 'errors/mouse-out-of-bounds-is-refused',
-      title: 'a point outside the virtual desktop is refused before any real move',
+      id: 'errors/cursor-moving-modes-are-refused',
+      title: 'v3 R1: every cursor-moving mode is refused (the host never moves the pointer)',
       async run(ctx) {
-        const guard = await cursorGuard(ctx, async () => {
-          await ctx.check.fails(
-            () => ctx.host().ok({ cmd: 'mouse', mode: 'click', x: -1000000, y: -1000000 }),
-            'an out-of-bounds foreground click fails',
-            { expect: 'outside the virtual desktop' },
-          )
-        }, 'the refused click did not move the real cursor')
-        if (!guard.verified) ctx.log(`cursor check not verifiable: ${guard.reason}`)
+        // `move` / `drag` used to drive the real pointer. Under strict background mode they
+        // must not exist at all: the refusal may say "unknown mode" or "background only",
+        // so the judgement here is simply that the call fails and nothing moves.
+        for (const [label, request] of [
+          ['move', { cmd: 'mouse', mode: 'move', x: 100, y: 100 }],
+          ['drag', { cmd: 'mouse', mode: 'drag', fromX: 1, fromY: 1, x: 20, y: 20 }],
+        ]) {
+          const guard = await cursorGuard(ctx, async () => {
+            await ctx.check.fails(
+              () => ctx.host().ok(request),
+              `mouse mode "${label}" is refused`,
+            )
+          }, `the refused "${label}" did not move the real cursor`)
+          if (!guard.verified) ctx.log(`cursor check not verifiable: ${guard.reason}`)
+        }
       },
     },
 
@@ -35,23 +42,7 @@ export default {
         await ctx.check.fails(
           () => ctx.host().ok({ cmd: 'mouse', mode: 'wiggle', x: 10, y: 10 }),
           'an unknown mouse mode fails',
-          { expect: 'unknown mouse mode' },
         )
-      },
-    },
-
-    {
-      id: 'errors/mouse-background-drag-is-refused',
-      title: 'the background (window) mode refuses unsupported gestures',
-      async run(ctx) {
-        const fixture = await ctx.fixture()
-        const guard = await cursorGuard(ctx, async () => {
-          await ctx.check.fails(
-            () => ctx.host().ok({ cmd: 'mouse', window: fixture.baseTitle, mode: 'drag', fromX: 1, fromY: 1, x: 20, y: 20 }),
-            'background drag fails instead of falling back to the real cursor',
-          )
-        }, 'the refused background drag did not move the real cursor')
-        if (!guard.verified) ctx.log(`cursor check not verifiable: ${guard.reason}`)
       },
     },
 
@@ -96,11 +87,13 @@ export default {
       title: 'typing into a non-existent window is refused (no foreground fallback)',
       async run(ctx) {
         const guard = await cursorGuard(ctx, async () => {
-          await ctx.check.fails(
+          const message = await ctx.check.fails(
             () => ctx.host().ok({ cmd: 'type', window: MISSING, text: 'must-not-be-typed' }),
-            'type with an unknown window fails',
-            { expect: 'no window' },
+            'type with an unknown window fails (no foreground fallback)',
           )
+          // v3 R4: whatever the exact wording, the refusal has to be about the missing
+          // target window / the strict-background rule.
+          ctx.check.match(message, /(window|background|后台)/i, 'the refusal names the missing window or the strict-background rule', JSON.stringify(message))
         }, 'the refused type did not touch the real input state')
         if (!guard.verified) ctx.log(`cursor check not verifiable: ${guard.reason}`)
       },
@@ -136,7 +129,7 @@ export default {
       async run(ctx) {
         const fixture = await ctx.fixture()
         await ctx.check.fails(
-          () => ctx.host().ok({ cmd: 'click', window: fixture.baseTitle, element: {} }),
+          () => ctx.host().ok({ cmd: 'mouse', mode: 'click', window: fixture.baseTitle, element: {} }),
           'an element selector with no discriminator fails',
         )
       },

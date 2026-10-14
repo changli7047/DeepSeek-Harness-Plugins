@@ -197,7 +197,7 @@ export function elapsedOf(text) {
   return m === null ? null : Number(m[1])
 }
 
-/** v2 §5 + §11: the full token set. `background-post` is the *default* element-click
- *  path (it must not steal focus); `uia-invoke-pattern` is only reachable through an
- *  explicit allowForeground:true, which this suite never sends. */
-export const STRATEGY_VALUES = ['background-post', 'uia-invoke-pattern', 'uia-value-pattern', 'wm-settext', 'keystream']
+/** v3 R5/R6: the strategy set after the strict-background change. Both `uia-*` legs are gone
+ *  (`uia-value-pattern` could activate the target window, `uia-invoke-pattern` always could),
+ *  leaving delivery-only tokens. */
+export const STRATEGY_VALUES = ['background-post', 'wm-settext', 'keystream']
