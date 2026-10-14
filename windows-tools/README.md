@@ -254,6 +254,12 @@ $HOST = "$REPO\windows-tools\host\wt-host.ps1"
 - **`winop move` 不做坐标钳制（有意为之）**：允许任意坐标，**含负值**——实测 `{"action":"move","x":-30000,"y":-30000}` 会照做并如实回执 `rect=-30000,-30000,...`。理由：多显示器布局里副屏坐标本来就可能是负的（主屏左侧的显示器），钳制会弄坏合法布局。（历史上那个会移动光标、带虚拟桌面越界校验的 `windows_move` 已按严格后台要求删除，现在只有这一条窗口移动路径。）
 - **被最小化的窗口里没有"屏上元素"**：`find` 与 `wait_for kind=element` 只认屏上且矩形非空的元素（契约 §8），所以窗口最小化时它们匹配不到任何东西——这不是 bug。要么先 `winop restore`，要么用 `wait_for kind=window` 等窗口本身。
 - **截图保留策略（默认目录）**：客户端在自己生成默认路径时会给宿主带 `prune: true`，宿主只清理该目录中**文件名匹配 `screenshot-*.png`（大小写不敏感）**的文件，保留最近 20 张（可用环境变量 `WINDOWS_TOOLS_SCREENSHOT_KEEP` 调整，夹紧 1–500），并在回执里报告 `|pruned=<n>` 或 `|pruned=<n> (k failures)`；删除失败不会让截图调用失败。**调用方显式传了 `filePath` 时一律不裁剪**，同目录里不符合命名规则的文件一概不动。
+- **宿主脚本缓存保留策略（启动时清理）**：插件每换一版宿主就会在临时目录里 materialize 一份 `wt-host-<内容哈希16位>.ps1`，旧版本不会自己消失。宿主**在启动时**（一次性，无定时器、无后台任务）清理自己所在目录，规则：
+  - **目录守卫**：只有当目录 basename 是 `dsh-windows-tools` 或 `opencode-windows-tools` 时才启用清理；**在仓库里直接跑 `windows-tools/host/wt-host.ps1` 时一个文件都不会动**（实测：非 `*-windows-tools` 目录下前后清单完全一致）。
+  - **只删**匹配 `^wt-host-[0-9a-fA-F]{16}\.ps1$` 的文件；**永不删**正在运行的脚本、不带哈希的 `wt-host.ps1`（OpenCode 的安装副本命名）、以及任何不匹配的文件（截图、用户文件）。
+  - 保留**最新 N 个**（按 `LastWriteTime` 降序，含正在运行的那个）：默认 **N=3**，环境变量 `WINDOWS_TOOLS_HOST_KEEP` 可覆盖，夹紧 **1–20**。
+  - 删除失败不影响宿主启动或任何调用（忽略并继续）；整段逻辑外层也包了 `try/catch`。
+  实测（自建 scratch）：`5 假脚本 + 运行副本 + screenshot-x.png + notes.txt + 无哈希 wt-host.ps1` → 清理后只剩**运行副本 + 最新 2 个**，两个非匹配文件与无哈希副本原样保留、运行脚本未被删；`WINDOWS_TOOLS_HOST_KEEP=1` → 只剩运行副本 1 个。
 - **Qt / 微信适配**：Qt 窗口的后台点击/输入投给**顶层窗口**（渲染子窗口会忽略合成消息）；微信 4.x 的输入栈按 **GBK（代码页 936）** 字节流解码；插件显式调用 `Encoding.GetEncoding(936)`（不再用随系统 locale 变化的 `Encoding.Default`），因此可直接后台输入中文。
 - **参数校验（失败即报错，不静默兜底）**：`windows_click`/`windows_scroll`/`windows_shortcut`/`windows_type` **缺 `window` 直接报错**（文案说明严格后台模式并给出指引）；`windows_screenshot` 的 `filePath` 目标已存在时默认拒绝覆盖（须显式 `overwrite: true`，扩展名必须 `.png`，拒绝时不动原文件）；截图区域 `x/y/width/height` 必须四个一起给或全不给；`windows_wait_for` 的 `foreground`/`window`/`text` 必须给非空 `value`，`element` 必须给至少一个选择器字段，`windowgone`/`element`/`text` 必须给 `target`；元素选择器**只给 `index`** 会报错（歧义选择器不许蒙默认值）；`click` 既不给 `x/y` 也不给 `element` 会报错；无原生句柄的元素写入会报错（见上）。
 - **后台截图**：被遮挡窗口可抓；**最小化窗口不可抓**（会明确报错）；极少数 GPU 渲染应用可能黑屏。
@@ -269,7 +275,8 @@ $HOST = "$REPO\windows-tools\host\wt-host.ps1"
 ## 维护与构建
 
 - `host/wt-host.ps1` 是**唯一逻辑源头**。
-- **宿主 JSON 行协议的健壮性约定**：`stdin` 按 **UTF-8** 解码（`[Console]::OpenStandardInput()` + `StreamReader`），所以客户端既可以发**原始 UTF-8**，也可以发**纯 ASCII 转义**（`\uXXXX`，两个插件就是用这种形式，避免依赖控制台代码页）；`stdout` 恒为 UTF-8。命令名：`status`/`snapshot`/`screenshot`/`hit`/`mouse`/`keys`/`type`/`activate`/`launch`/`clipboard`/`waitfor`/`find`/`read`/`winop`/`procs`，其中 `click` 是 `mouse` + `mode:'click'` 的别名（两种等价）。
+- **宿主 JSON 行协议的健壮性约定**：`stdin` 按 **UTF-8** 解码（`[Console]::OpenStandardInput()` + `StreamReader`），所以客户端既可以发**原始 UTF-8**，也可以发**纯 ASCII 转义**（`\uXXXX`，两个插件就是用这种形式，避免依赖控制台代码页）；`stdout` 恒为 UTF-8。命令名：`status`/`snapshot`/`screenshot`/`hit`/`mouse`/`keys`/`type`/`clipboard`/`waitfor`/`find`/`read`/`winop`/`procs`，其中 `click` 是 `mouse` + `mode:'click'` 的别名（两种等价）。严格后台模式下没有 `activate`/`launch`，`mouse` 只接受 `click`/`scroll`。
+- **两个保留策略（都可配、都在客户端/宿主自己身上生效）**：截图默认目录用 `WINDOWS_TOOLS_SCREENSHOT_KEEP`（默认 20，夹紧 1–500，见「限制与安全」）；宿主脚本缓存用 `WINDOWS_TOOLS_HOST_KEEP`（默认 3，夹紧 1–20，启动时清理，带目录名守卫）。
 - 修改后运行构建器重新生成 dsh 版（内嵌宿主）：
   ```powershell
   node windows-tools\build\build.mjs

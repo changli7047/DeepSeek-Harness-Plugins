@@ -92,8 +92,10 @@ export class Host {
     })
   }
 
-  static async start({ env = process.env, cwd = REPO_DIR, readyTimeoutMs = 30000, label = 'host' } = {}) {
-    const child = spawn(POWERSHELL, ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', HOST_PS1], {
+  static async start({ env = process.env, cwd = REPO_DIR, readyTimeoutMs = 30000, label = 'host', script = HOST_PS1 } = {}) {
+    // `script` lets a case run a *copy* of the host from a prepared directory, which is how
+    // the cache-retention cases control the directory the host sees as its own.
+    const child = spawn(POWERSHELL, ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', script], {
       cwd, env, stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true,
     })
     const host = new Host(child)

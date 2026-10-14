@@ -49,6 +49,7 @@ node windows-tools/tests/run.mjs
 | `errors` | 空 value、非法的前台 mouse 模式（`move`/`drag` 必须被拒）、不存在的窗口、非法 action/mode/命令 —— 必须报错，静默兜底算失败 |
 | `hygiene` | 宿主两行自检；红线（不移动真实鼠标、不占前台、不碰用户真实截图目录）；截图 `prune`/`pruneKeep`；元素输入链的静态+运行期判据 |
 | `strict` | **v3 严格后台**：R1–R3 静态审计（host + artifact + opencode 命中 0）、R4 缺 `window` 必须报错、R5 前台开关已删、R6 WPF 元素输入明确报错 / Win32 仍可写入回读、R8 工具面 = 14 |
+| `cache` | **宿主脚本缓存保留**（每个用例自建假缓存目录，并把宿主的 `TEMP` 重定向到 scratch —— 用户真实 `%TEMP%\dsh-windows-tools\` 永不在扫描面内）：只删 `^wt-host-[0-9a-f]{16}\.ps1$`、默认保留最新 3、`WINDOWS_TOOLS_HOST_KEEP=1` 只剩 1、**目录守卫**（非 `*-windows-tools` 目录一个都不删）、**不可删文件不让宿主出错**（用 `FileShare.None` 稳定构造：锁住最旧那份，断言宿主照常 `status`、被锁文件仍在、其余该清的仍清掉） |
 | `build` | 构建幂等（在 `%TEMP%` 副本里跑两次比哈希）+ 仓库产物与当前 host 同步 |
 | `dsh` | 生成物静态形状（14 注册 / 1 个 `apply`）+ env 门控装载冒烟 |
 

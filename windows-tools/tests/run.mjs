@@ -31,10 +31,11 @@ import cWindow from './cases/c-window.mjs'
 import errors from './cases/errors.mjs'
 import hygiene from './cases/hygiene.mjs'
 import strict from './cases/strict-background.mjs'
+import cache from './cases/cache-retention.mjs'
 import build from './cases/build.mjs'
 import dsh from './cases/dsh.mjs'
 
-const GROUPS = [basic, bElement, cWindow, errors, hygiene, strict, build, dsh].filter((group) => {
+const GROUPS = [basic, bElement, cWindow, errors, hygiene, strict, cache, build, dsh].filter((group) => {
   const only = process.env.WT_ONLY
   if (only === undefined || only.trim() === '') return true
   return only.split(',').map((name) => name.trim()).includes(group.name)

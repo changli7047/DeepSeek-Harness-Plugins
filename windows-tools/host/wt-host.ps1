@@ -1515,6 +1515,47 @@ function Invoke-WtCommand($req) {
   }
 }
 
+# ---- host-script retention (runs once at startup) ---------------------------
+# Every plugin version materializes its own content-addressed copy of this script
+# as wt-host-<hash16>.ps1 in the plugin's temporary directory, and nothing else
+# removes the older ones. Prune them once at startup: keep the newest N, never
+# touch the running script, never touch a name that is not content-addressed, and
+# never act outside the plugin's own two directories (so running this file from a
+# checkout cannot delete anything in that checkout).
+function Invoke-WtHostScriptPrune {
+  try {
+    $dir = [string]$PSScriptRoot
+    if ([string]::IsNullOrWhiteSpace($dir)) { return }
+    $leaf = Split-Path -Leaf $dir
+    if ($leaf -ne 'dsh-windows-tools' -and $leaf -ne 'opencode-windows-tools') { return }
+    $keep = 3
+    $raw = [string]$env:WINDOWS_TOOLS_HOST_KEEP
+    if (-not [string]::IsNullOrWhiteSpace($raw)) {
+      $parsed = 0
+      if ([int]::TryParse($raw.Trim(), [ref]$parsed)) { $keep = $parsed }
+    }
+    if ($keep -lt 1) { $keep = 1 }
+    if ($keep -gt 20) { $keep = 20 }
+    $self = [string]$PSCommandPath
+    $candidates = New-Object System.Collections.Generic.List[string]
+    foreach ($file in [System.IO.Directory]::GetFiles($dir, 'wt-host-*')) {
+      if ([System.IO.Path]::GetFileName($file) -notmatch '^wt-host-[0-9a-fA-F]{16}\.ps1$') { continue }
+      [void]$candidates.Add($file)
+    }
+    if ($candidates.Count -le $keep) { return }
+    # Newest first by write time; the running script is ranked like any other but
+    # is never removed, even when it falls outside the kept window.
+    $sorted = @($candidates | Sort-Object @{ Expression = { (Get-Item -LiteralPath $_).LastWriteTime }; Descending = $true }, @{ Expression = { $_ }; Descending = $false })
+    for ($i = $keep; $i -lt $sorted.Count; $i++) {
+      $path = $sorted[$i]
+      if (-not [string]::IsNullOrWhiteSpace($self) -and $path -eq $self) { continue }
+      try { Remove-Item -LiteralPath $path -Force -ErrorAction Stop } catch { }
+    }
+  } catch { }
+}
+
+Invoke-WtHostScriptPrune
+
 [Console]::Out.WriteLine('{"ok":true,"ready":true}')
 [Console]::Out.Flush()
 
