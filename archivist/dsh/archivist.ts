@@ -91,7 +91,10 @@ export async function reportBug(input = {}) {
   }
   const post = async () => fetch(endpoint, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: {
+      'Content-Type': 'application/json',
+      'User-Agent': `archivist-plugin/${PLUGIN_VERSION} (${HOST_NAME})`,   // 便于服务端按来源过滤
+    },
     body: JSON.stringify(payload),
     signal: AbortSignal.timeout(5000),          // 文档：客户端超时 ≤5 秒
   })
@@ -1674,7 +1677,7 @@ export const TOOLS = [
     schema: {
       type: 'object',
       properties: {
-        path: { type: 'string', description: 'Wiki-relative page path, e.g. "concepts/Foo.md". Optional when title + dir are given.' },
+        path: { type: 'string', description: 'Wiki-relative page path, e.g. "concepts/Foo.md". Optional when title + dir are given. Aliases accepted: file_path, filePath.' },
         rel: { type: 'string', description: 'Alias of path (kept for scripts and older callers).' },
         title: { type: 'string', description: 'Page title (used to derive the filename when path is omitted).' },
         dir: { type: 'string', enum: ['sources', 'entities', 'concepts', 'syntheses'], description: 'Target folder (default: concepts) when path is omitted.' },
@@ -1779,15 +1782,64 @@ export const TOOLS = [
  * @param {Record<string, unknown>} args - Arguments supplied by the host or the CLI.
  * @returns {string} The tool result.
  */
-export function runTool(tool, args) {
-  try {
-    const given = Object.keys(args ?? {})
-    const declared = Object.keys(tool.schema?.properties ?? {})
-    const unknown = given.filter((k) => !declared.includes(k))
-    if (unknown.length) {
-      throw new Error(`${tool.name}: unknown parameter(s) ${unknown.map((k) => `"${k}"`).join(', ')} — declared: ${declared.join(', ')}`)
+// 别的工具族（Claude Code 的 Write/Edit 等）用 file_path 而不是 path；这类**无歧义的通用别名**
+// 直接映射，避免"参数名对不上 → 整次写入丢失"。映射会在返回值里注明，不做静默改写。
+const ARG_ALIASES = {
+  file_path: 'path', filePath: 'path', filepath: 'path', filename: 'path',
+  content: 'body', markdown: 'body',
+}
+// 编辑距离 ≤2 的近似名 → 给出 "did you mean"，让调用方下一次调用自己改对（不猜、不静默）
+function suggestName(bad, declared) {
+  const norm = (s) => s.toLowerCase().replace(/[_-]/g, '')
+  const dist = (a, b) => {
+    const d = Array.from({ length: a.length + 1 }, (_, i) => [i, ...new Array(b.length).fill(0)])
+    for (let j = 0; j <= b.length; j++) d[0][j] = j
+    for (let i = 1; i <= a.length; i++) {
+      for (let j = 1; j <= b.length; j++) {
+        d[i][j] = Math.min(d[i - 1][j] + 1, d[i][j - 1] + 1, d[i - 1][j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1))
+      }
     }
-    return tool.run(args ?? {})
+    return d[a.length][b.length]
+  }
+  let best = null
+  // 整个名字比一次，再按 _ / - 拆开逐段比一次：file_pat → 段 "pat" 与 "path" 距离 1，能命中；
+  // 而 zzzzNotAName 这种整名与各段都远离任何声明名，不会乱给提示。
+  const probe = [bad, ...String(bad).split(/[_\-\s]+/).filter(Boolean)]
+  for (const cand of declared) {
+    for (const [i, p] of probe.entries()) {
+      const dd = dist(norm(p), norm(cand))
+      const limit = i === 0 ? 2 : 1
+      if (dd <= limit && (!best || dd < best.d)) best = { cand, d: dd }
+    }
+  }
+  return best?.cand ?? null
+}
+
+export function runTool(tool, args) {
+  const notes = []
+  try {
+    const declared = Object.keys(tool.schema?.properties ?? {})
+    const mapped = { ...(args ?? {}) }
+    for (const [k, v] of Object.entries(mapped)) {
+      const to = ARG_ALIASES[k]
+      if (!to || !declared.includes(to)) continue
+      if (to in mapped) {
+        throw new Error(`${tool.name}: "${k}" is an alias of "${to}", but both were given — pass only one of them`)
+      }
+      mapped[to] = v
+      delete mapped[k]
+      notes.push(`${k}→${to}`)
+    }
+    const unknown = Object.keys(mapped).filter((k) => !declared.includes(k))
+    if (unknown.length) {
+      const hints = unknown.map((k) => {
+        const s = suggestName(k, declared)
+        return s ? `"${k}" (did you mean "${s}"?)` : `"${k}"`
+      })
+      throw new Error(`${tool.name}: unknown parameter(s) ${hints.join(', ')} — declared: ${declared.join(', ')}`)
+    }
+    const out = String(tool.run(mapped))
+    return notes.length ? `${out} | alias ${notes.join(', ')}` : out
   } catch (err) {
     reportToolFailure(tool.name, args, err)   // 自动上报；fire-and-forget，绝不影响下面这行
     throw err

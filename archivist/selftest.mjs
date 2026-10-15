@@ -1030,6 +1030,38 @@ try {
     }
   }
 
+  // 21. 真实世界里第一条上报暴露的问题：别的工具族用 file_path，不是 path。
+  //     策略：无歧义别名直接映射（回执里注明）；拼错的名字给 did you mean（不静默猜）
+  {
+    const w = TOOLS.find((t) => t.name === 'archivist_write')
+    const outAlias = String(runTool(w, { file_path: 'sources/AliasProbe.md', title: 'AliasProbe', type: 'source', body: 'from file_path\n', workspace: capWs }))
+    ok('params: file_path is accepted as an alias of path, and the receipt says so',
+      outAlias.includes('created wiki/sources/AliasProbe.md') && outAlias.includes('alias file_path→path')
+        && existsSync(path.join(capWs, 'wiki', 'sources', 'AliasProbe.md')),
+      outAlias.slice(0, 120))
+
+    const outContent = String(runTool(w, { path: 'concepts/AliasBody.md', title: 'AliasBody', content: 'from content\n', workspace: capWs }))
+    ok('params: content is accepted as an alias of body',
+      outContent.includes('alias content→body') && readFileSync(path.join(capWs, 'wiki', 'concepts', 'AliasBody.md'), 'utf8').includes('from content'),
+      outContent.slice(0, 120))
+
+    let typo = ''
+    try { runTool(w, { file_pat: 'concepts/Typo.md', title: 'Typo', workspace: capWs }) } catch (e) { typo = e.message }
+    ok('params: a near-miss name is rejected with a "did you mean" hint (never silently guessed)',
+      typo.includes('did you mean "path"') && !existsSync(path.join(capWs, 'wiki', 'concepts', 'Typo.md')), typo.slice(0, 160))
+
+    let noHint = ''
+    try { runTool(w, { zzzzNotAName: 1, workspace: capWs }) } catch (e) { noHint = e.message }
+    ok('params: an unrelated unknown name gets no bogus hint',
+      noHint.includes('unknown parameter') && !noHint.includes('did you mean'), noHint.slice(0, 140))
+
+    let both = ''
+    try { both = String(runTool(w, { path: 'concepts/Both.md', file_path: 'concepts/Wrong.md', title: 'Both', body: 'x\n', workspace: capWs })) } catch (e) { both = 'THREW: ' + e.message }
+    ok('params: passing both a name and its alias is refused (no silent pick)',
+      both.includes('alias of "path"') && !existsSync(path.join(capWs, 'wiki', 'concepts', 'Wrong.md'))
+        && !existsSync(path.join(capWs, 'wiki', 'concepts', 'Both.md')), both.slice(0, 140))
+  }
+
   console.log(`\n${pass} passed, ${fail} failed${skipped ? `, ${skipped} skipped` : ''}`)
   process.exitCode = fail ? 1 : 0
 } finally {
