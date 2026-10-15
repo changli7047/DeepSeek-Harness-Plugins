@@ -19,6 +19,12 @@ const cleanupPaths = [ws]
 process.env.ARCHIVIST_POINTER = path.join(os.tmpdir(), 'archivist-smoke-pointer.json')
 // 自检里有大量"故意失败"的调用：默认关掉 BUG 上报，免得灌满生产库（只在专门那组里临时打开）。
 process.env.ARCHIVIST_BUG_REPORT = '0'
+// 而且全程拦截 fetch 记账：自检**绝不允许**有任何请求打到生产上报端点，末尾有断言兜底。
+// （2026-10-15 修：曾因那个测试块的 finally 恢复成"默认开 + 生产端点"，把第 21 组的故意失败
+//   样本真的发到了生产库 —— 这条断言就是防止同类事故再发生。）
+const outboundCalls = []
+const realFetch = globalThis.fetch
+globalThis.fetch = async (url, init) => { outboundCalls.push(String(url)); return realFetch(url, init) }
 let pass = 0, fail = 0, skipped = 0
 const ok = (name, cond, extra = '') => {
   if (cond) { pass++; console.log('PASS ' + name) }
@@ -1024,7 +1030,7 @@ try {
       ok('bug report: ARCHIVIST_BUG_REPORT=0 disables reporting entirely',
         received.length === before6 && off.ok === false && String(off.error).includes('disabled'), JSON.stringify(off))
     } finally {
-      delete process.env.ARCHIVIST_BUG_REPORT      // 回到"默认开"，但自检后续不再触发失败调用
+      process.env.ARCHIVIST_BUG_REPORT = '0'   // 全程关闭：后面的断言还会故意失败，绝不能再发生产
       delete process.env.ARCHIVIST_BUG_ENDPOINT
       await new Promise((r) => srv.close(r))
     }
@@ -1062,8 +1068,20 @@ try {
         && !existsSync(path.join(capWs, 'wiki', 'concepts', 'Both.md')), both.slice(0, 140))
   }
 
+  // 22. 自检自身的卫生检查：全程不得有任何请求打到生产上报端点
+  {
+    const prod = outboundCalls.filter((u) => u.includes('42.194.129.192'))
+    const local = outboundCalls.filter((u) => u.includes('127.0.0.1'))
+    ok('selftest hygiene: zero requests to the production bug endpoint during the whole run',
+      prod.length === 0, prod.slice(0, 3).join(' '))
+    ok('selftest hygiene: reporting assertions used only the local fake endpoint, and reporting stays off',
+      local.length >= 4 && process.env.ARCHIVIST_BUG_REPORT === '0',
+      `local=${local.length} flag=${process.env.ARCHIVIST_BUG_REPORT}`)
+  }
+
   console.log(`\n${pass} passed, ${fail} failed${skipped ? `, ${skipped} skipped` : ''}`)
   process.exitCode = fail ? 1 : 0
 } finally {
+  globalThis.fetch = realFetch
   for (const p of cleanupPaths) { try { rmSync(p, { recursive: true, force: true }) } catch { } }
 }
