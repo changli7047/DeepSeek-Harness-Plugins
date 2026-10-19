@@ -1063,6 +1063,18 @@ try {
         await waitFor(before7c + 1)
         ok('fresh machine: a genuine error is still reported (the skip stays narrow)',
           received.length === before7c + 1, 'delta=' + (received.length - before7c))
+
+        // 写操作指向非 wiki 目录：必须被门禁挡住，且不许产生上报
+        const before7d = received.length
+        let write7 = ''
+        try {
+          runTool(TOOLS.find((t) => t.name === 'archivist_write'),
+            { workspace: path.join(os.tmpdir(), 'archivist-not-a-wiki-' + Date.now()), path: 'concepts/A.md', title: 'A', body: 'x\n' })
+        } catch (e) { write7 = e.message }
+        await new Promise((r) => setTimeout(r, 250))
+        ok('fresh machine: a write aimed outside a wiki is refused without a bug report',
+          write7.includes('not a wiki workspace') && received.length === before7d,
+          write7.slice(0, 120) + ' delta=' + (received.length - before7d))
       } finally {
         process.env.ARCHIVIST_POINTER = savedPointer
         if (savedDirEnv === undefined) delete process.env.ARCHIVIST_DIR
@@ -1116,6 +1128,58 @@ try {
     ok('selftest hygiene: reporting assertions used only the local fake endpoint, and reporting stays off',
       local.length >= 4 && process.env.ARCHIVIST_BUG_REPORT === '0',
       `local=${local.length} flag=${process.env.ARCHIVIST_BUG_REPORT}`)
+  }
+
+  // 23. 真上报暴露的三个问题：缺必填参数抛 TypeError、非 wiki 目录静默建库、备份空目录 ENOENT
+  {
+    const notWiki = path.join(os.tmpdir(), 'archivist-not-wiki-' + Date.now())
+    mkdirSync(notWiki, { recursive: true })
+    cleanupPaths.push(notWiki)
+    const toolOf = (n) => TOOLS.find((t) => t.name === n)
+
+    let miss1 = null
+    try { runTool(toolOf('archivist_attach'), {}) } catch (e) { miss1 = e }
+    ok('params: a missing required parameter is a clear error, not a TypeError',
+      !!miss1 && !(miss1 instanceof TypeError) && miss1.message.includes('missing required parameter') && miss1.message.includes('"path"'),
+      miss1 ? miss1.message : 'NO THROW')
+
+    let miss2 = null
+    try { runTool(toolOf('archivist_init'), {}) } catch (e) { miss2 = e }
+    ok('params: init without path is refused the same way (no TypeError)',
+      !!miss2 && !(miss2 instanceof TypeError) && miss2.message.includes('missing required parameter'),
+      miss2 ? miss2.message : 'NO THROW')
+
+    // 非 wiki 目录：凡是要读写 wiki 的工具都必须被门禁挡住，且一个文件都不许生出来
+    const gated = [
+      ['archivist_write', { workspace: notWiki, path: 'concepts/A.md', title: 'A', body: 'x\n' }],
+      ['archivist_read', { workspace: notWiki, path: 'a.md' }],
+      ['archivist_backup', { workspace: notWiki }],
+      ['archivist_commit', { workspace: notWiki }],
+      ['archivist_search', { workspace: notWiki, query: 'x' }],
+      ['archivist_scan', { workspace: notWiki, query: 'x' }],
+      ['archivist_lint', { workspace: notWiki }],
+    ]
+    for (const [name, args] of gated) {
+      let e = null
+      try { runTool(toolOf(name), args) } catch (err) { e = err }
+      ok(`${name} is refused outside a wiki as an expected state`,
+        !!e && e.expected === true && e.code === 'not-a-wiki' && e.message.includes('not a wiki workspace'),
+        e ? e.message.slice(0, 120) : 'NO THROW')
+    }
+    ok('gated tools left the non-wiki directory untouched (no silent wiki/ scaffolding)',
+      readdirSync(notWiki).length === 0, readdirSync(notWiki).join(',') || '(empty)')
+
+    // 空快照：源目录里只有被排除项时，也必须写出 files: 0 的合法快照，而不是 ENOENT
+    const emptySrc = path.join(os.tmpdir(), 'archivist-empty-src-' + Date.now())
+    const emptyDst = path.join(os.tmpdir(), 'archivist-empty-dst-' + Date.now())
+    mkdirSync(path.join(emptySrc, '.git'), { recursive: true })
+    cleanupPaths.push(emptySrc, emptyDst)
+    let snap = ''
+    try { snap = backupWorkspace(emptySrc, emptyDst) } catch (e) { snap = 'THREW: ' + e.message }
+    const snapDir = existsSync(emptyDst) ? readdirSync(emptyDst).find((n) => n.startsWith('archivist-')) : null
+    ok('backup: nothing to copy still writes a valid files:0 snapshot (no ENOENT)',
+      snap.includes('files: 0') && !!snapDir && existsSync(path.join(emptyDst, snapDir, 'backup-manifest.json')),
+      snap.slice(0, 140))
   }
 
   console.log(`\n${pass} passed, ${fail} failed${skipped ? `, ${skipped} skipped` : ''}`)

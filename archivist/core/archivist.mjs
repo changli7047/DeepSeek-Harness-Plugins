@@ -47,7 +47,7 @@ const SCAN_ROW_CAP = 60
 //   ARCHIVIST_BUG_ENDPOINT  默认 http://42.194.129.192:8787/api/bugs
 //   ARCHIVIST_BUG_REPORT=0  关闭上报（默认开）
 const BUG_ENDPOINT_DEFAULT = 'http://42.194.129.192:8787/api/bugs'
-export const PLUGIN_VERSION = '1.0.1'
+export const PLUGIN_VERSION = '1.0.2'
 const BUG_SOURCE = 'archivist-plugin'
 let HOST_NAME = 'unknown'
 
@@ -208,6 +208,9 @@ function resolveDir(explicit) {
   }
   return path.resolve(dir)
 }
+// 所有"要读写 wiki"的工具都在 TOOLS 的 run 里先过这道门禁（唯一入口是 runTool）：
+// 指向的不是库时给统一的 not-a-wiki 预期状态，而不是各自渗出的 ENOENT / page not found /
+// 静默建目录。门禁放在工具层而非各 core 函数里，是为了不挡住 init/rebuildIndex 这类要建库的内部调用。
 function requireWiki(dir) {
   if (!existsSync(path.join(dir, WIKI, 'index.md'))) {
     throw expected(`not a wiki workspace (missing ${WIKI}/index.md): ${dir} — run archivist_init or archivist_attach first`, 'not-a-wiki')
@@ -1488,6 +1491,9 @@ export function backupWorkspace(dir, target, keep = DEFAULT_KEEP) {
   let n = 1
   while (existsSync(path.join(base, name))) { n++; name = BACKUP_PREFIX + stamp() + '-' + n }
   const dest = path.join(base, name)
+  // 先建快照目录：没有可复制的文件时（目录被清空 / 全被排除），下面的 writeFileSync
+  // 会直接 ENOENT —— 空快照应该是一份"文件数 0"的合法快照，而不是一个真错误上报。
+  ensureDir(dest)
   // Manual recursive copy: fs.cpSync refuses to copy a directory into its own
   // subtree, and the default backup target lives inside the workspace.
   let files = 0, bytes = 0
@@ -1643,7 +1649,11 @@ export const TOOLS = [
       required: ['query'],
       additionalProperties: false,
     },
-    run: (a) => searchWiki(resolveDir(a.workspace), String(a.query ?? ''), a.limit ? Number(a.limit) : 15, String(a.scope || 'wiki')),
+    run: (a) => {
+      const dir = resolveDir(a.workspace)
+      requireWiki(dir)
+      return searchWiki(dir, String(a.query ?? ''), a.limit ? Number(a.limit) : 15, String(a.scope || 'wiki'))
+    },
   },
   {
     name: 'archivist_scan',
@@ -1658,7 +1668,11 @@ export const TOOLS = [
       required: ['query'],
       additionalProperties: false,
     },
-    run: (a) => scanCorpus(resolveDir(a.workspace), String(a.query ?? ''), String(a.scope || 'all')),
+    run: (a) => {
+      const dir = resolveDir(a.workspace)
+      requireWiki(dir)
+      return scanCorpus(dir, String(a.query ?? ''), String(a.scope || 'all'))
+    },
   },
   {
     name: 'archivist_read',
@@ -1672,7 +1686,11 @@ export const TOOLS = [
       },
       additionalProperties: false,
     },
-    run: (a) => readPages(resolveDir(a.workspace), a.paths || a.path),
+    run: (a) => {
+      const dir = resolveDir(a.workspace)
+      requireWiki(dir)
+      return readPages(dir, a.paths || a.path)
+    },
   },
   {
     name: 'archivist_write',
@@ -1701,7 +1719,12 @@ export const TOOLS = [
       },
       additionalProperties: false,
     },
-    run: (a) => writePage(resolveDir(a.workspace), a),
+    run: (a) => {
+      // 门禁必须在写之前：非 wiki 目录下 ensureDir 会静默造出 wiki/concepts/… 和 wiki/index.md
+      const dir = resolveDir(a.workspace)
+      requireWiki(dir)
+      return writePage(dir, a)
+    },
   },
   {
     name: 'archivist_index',
@@ -1725,7 +1748,11 @@ export const TOOLS = [
       },
       additionalProperties: false,
     },
-    run: (a) => lintWiki(resolveDir(a.workspace), { fix: !!a.fix }),
+    run: (a) => {
+      const dir = resolveDir(a.workspace)
+      requireWiki(dir)
+      return lintWiki(dir, { fix: !!a.fix })
+    },
   },
   {
     name: 'archivist_log',
@@ -1757,7 +1784,11 @@ export const TOOLS = [
       },
       additionalProperties: false,
     },
-    run: (a) => backupWorkspace(resolveDir(a.workspace), a.target, a.keep !== undefined ? Number(a.keep) : DEFAULT_KEEP),
+    run: (a) => {
+      const dir = resolveDir(a.workspace)
+      requireWiki(dir)
+      return backupWorkspace(dir, a.target, a.keep !== undefined ? Number(a.keep) : DEFAULT_KEEP)
+    },
   },
   {
     name: 'archivist_commit',
@@ -1770,7 +1801,11 @@ export const TOOLS = [
       },
       additionalProperties: false,
     },
-    run: (a) => commitWorkspace(resolveDir(a.workspace), a.message),
+    run: (a) => {
+      const dir = resolveDir(a.workspace)
+      requireWiki(dir)
+      return commitWorkspace(dir, a.message)
+    },
   },
 ]
 
@@ -1840,6 +1875,15 @@ export function runTool(tool, args) {
         return s ? `"${k}" (did you mean "${s}"?)` : `"${k}"`
       })
       throw new Error(`${tool.name}: unknown parameter(s) ${hints.join(', ')} — declared: ${declared.join(', ')}`)
+    }
+    // 必填参数缺失时给可执行的报错，而不是让 undefined 一路渗进去抛 TypeError
+    // （真实上报：archivist_attach '{}' → "paths[0] ... undefined"，且被当 crash/high 级）。
+    const missing = (tool.schema?.required ?? []).filter((k) => {
+      const v = mapped[k]
+      return v === undefined || v === null || (typeof v === 'string' && !v.trim())
+    })
+    if (missing.length) {
+      throw new Error(`${tool.name}: missing required parameter(s) ${missing.map((k) => `"${k}"`).join(', ')} — declared: ${declared.join(', ')}`)
     }
     const out = String(tool.run(mapped))
     return notes.length ? `${out} | alias ${notes.join(', ')}` : out
