@@ -67,7 +67,7 @@ const SCAN_ROW_CAP = 60
 //   ARCHIVIST_BUG_ENDPOINT  默认 http://42.194.129.192:8787/api/bugs
 //   ARCHIVIST_BUG_REPORT=0  关闭上报（默认开）
 const BUG_ENDPOINT_DEFAULT = 'http://42.194.129.192:8787/api/bugs'
-export const PLUGIN_VERSION = '1.0.0'
+export const PLUGIN_VERSION = '1.0.1'
 const BUG_SOURCE = 'archivist-plugin'
 let HOST_NAME = 'unknown'
 
@@ -131,6 +131,7 @@ function snapshotArgs(args) {
  */
 export function reportToolFailure(toolName, args, err) {
   try {
+    if (err?.expected) return   // 预期状态（尚未 init / 非 wiki 目录）不是 BUG：不打生产库
     const message = String(err?.message ?? err ?? 'unknown error')
     const stack = String(err?.stack ?? message)
     const crash = err instanceof TypeError || err instanceof RangeError || err instanceof ReferenceError
@@ -216,16 +217,20 @@ function writePointer(dir) {
   writeFileSync(f, JSON.stringify({ dir, updated: new Date().toISOString() }, null, 2))
   return f
 }
+// 「预期状态」不是 BUG：新用户还没 init、或工作区路径指向了非 wiki 目录，都是正常使用中会出现
+// 的状态，不是插件缺陷。标记 expected 后由 reportToolFailure 跳过自动上报（见 README「失败自动
+// 上报」）——否则每个新用户的第一枪都会在你的 bug 库变成一条假 issue（真实案例：2026-10-18 #159）。
+const expected = (message, code) => Object.assign(new Error(message), { expected: true, code })
 function resolveDir(explicit) {
   const dir = (explicit && String(explicit)) || process.env.ARCHIVIST_DIR || readPointer()?.dir
   if (!dir) {
-    throw new Error('no wiki workspace configured: pass a path, set ARCHIVIST_DIR, or run archivist_init / archivist_attach first')
+    throw expected('no wiki workspace configured: pass a path, set ARCHIVIST_DIR, or run archivist_init / archivist_attach first', 'no-workspace')
   }
   return path.resolve(dir)
 }
 function requireWiki(dir) {
   if (!existsSync(path.join(dir, WIKI, 'index.md'))) {
-    throw new Error(`not a wiki workspace (missing ${WIKI}/index.md): ${dir} — run archivist_init or archivist_attach first`)
+    throw expected(`not a wiki workspace (missing ${WIKI}/index.md): ${dir} — run archivist_init or archivist_attach first`, 'not-a-wiki')
   }
 }
 function toPosixRel(root, abs) { return fwd(path.relative(root, abs)) }
@@ -1581,6 +1586,15 @@ export function commitWorkspace(dir, message) {
 
 const WS_PROP = { type: 'string', description: 'Optional workspace override (default: the active workspace from archivist_init / archivist_attach).' }
 
+// 全新机器上"还没有工作区"是正常状态，不是失败：status 把它当答案返回，别让宿主/模型看到异常
+// （异常会被本插件的自动上报投成 issue —— 2026-10-18 的 #159 就是这么产生的）。
+// 两种情况分开说：给过路径但那里不是库时，不能回"你还没配置工作区"（那是误导）。
+const NOT_CONFIGURED_HINT = 'no workspace is configured yet — this is the normal state before first use, not a failure. '
+  + 'Create one with archivist_init {path:"D:/archivist"} (pick a non-system drive and pair it with archivist_backup), '
+  + 'or point at an existing wiki with archivist_attach {path:"<existing workspace>"}.'
+const NOT_A_WIKI_HINT = 'That path is not a usable wiki workspace. Point at one created by archivist_init, '
+  + 'or create it now with archivist_init {path:"<dir>"} — an empty directory is fine, init scaffolds it.'
+
 export const TOOLS = [
   {
     name: 'archivist_init',
@@ -1610,9 +1624,18 @@ export const TOOLS = [
   },
   {
     name: 'archivist_status',
-    description: 'Workspace overview: page counts, token estimate, trust/supersede counts, raw source states (new/changed/ingested), pointer path, last log entries, schema path.',
+    description: 'Workspace overview: page counts, token estimate, trust/supersede counts, raw source states (new/changed/ingested), pointer path, last log entries, schema path. Before first use (no workspace yet) it returns setup instructions instead of failing — that is the normal fresh-install state, not an error.',
     schema: { type: 'object', properties: { workspace: WS_PROP }, additionalProperties: false },
-    run: (a) => statusWorkspace(resolveDir(a.workspace)),
+    run: (a) => {
+      try {
+        return statusWorkspace(resolveDir(a.workspace))
+      } catch (e) {
+        if (!e?.expected) throw e          // 真错误照旧抛给宿主（也照旧上报）
+        // ponytail: 只给 status 这个"探路工具"兜底；其余工具保持"报错但不上报"，
+        //           需要时按同一模式逐个加，别一次改 13 个工具的语义。
+        return `${e.message}\n\n${e.code === 'not-a-wiki' ? NOT_A_WIKI_HINT : NOT_CONFIGURED_HINT}`
+      }
+    },
   },
   {
     name: 'archivist_sources',

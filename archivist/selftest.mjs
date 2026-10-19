@@ -1029,6 +1029,45 @@ try {
       await new Promise((r) => setTimeout(r, 200))
       ok('bug report: ARCHIVIST_BUG_REPORT=0 disables reporting entirely',
         received.length === before6 && off.ok === false && String(off.error).includes('disabled'), JSON.stringify(off))
+
+      // ⑦ 预期状态（全新机器：从没 init 过）不得上报，且 status 返回提示而不是抛错。
+      //    真实来源：2026-10-18 #159 —— 新用户第一枪 archivist_status({}) 被投成了 BUG。
+      process.env.ARCHIVIST_BUG_REPORT = '1'
+      process.env.ARCHIVIST_BUG_ENDPOINT = endpoint
+      const savedPointer = process.env.ARCHIVIST_POINTER
+      const savedDirEnv = process.env.ARCHIVIST_DIR
+      process.env.ARCHIVIST_POINTER = path.join(os.tmpdir(), 'archivist-smoke-absent-pointer-' + Date.now() + '.json')
+      delete process.env.ARCHIVIST_DIR
+      try {
+        const before7 = received.length
+        let fresh = ''
+        try { fresh = String(runTool(statusToolForBug, {})) } catch (e) { fresh = 'THREW: ' + e.message }
+        await new Promise((r) => setTimeout(r, 250))
+        ok('fresh machine: archivist_status explains the setup instead of throwing',
+          !fresh.startsWith('THREW') && fresh.includes('no wiki workspace configured') && fresh.includes('archivist_init'),
+          fresh.slice(0, 160))
+        ok('fresh machine: the expected "not configured yet" state is not reported as a bug',
+          received.length === before7, 'delta=' + (received.length - before7))
+
+        const before7b = received.length
+        let notWiki = ''
+        try { notWiki = String(runTool(statusToolForBug, { workspace: path.join(os.tmpdir(), 'archivist-not-a-wiki-' + Date.now()) })) } catch (e) { notWiki = 'THREW: ' + e.message }
+        await new Promise((r) => setTimeout(r, 250))
+        ok('fresh machine: pointing at a non-wiki directory is explained, not reported',
+          !notWiki.startsWith('THREW') && notWiki.includes('not a wiki workspace') && received.length === before7b
+            && !notWiki.includes('no workspace is configured yet'),   // 给过路径，别说"你还没配置"
+          notWiki.slice(0, 160))
+
+        const before7c = received.length
+        try { runTool(statusToolForBug, { workspace: ws, bogusParam: 1 }) } catch { /* expected */ }
+        await waitFor(before7c + 1)
+        ok('fresh machine: a genuine error is still reported (the skip stays narrow)',
+          received.length === before7c + 1, 'delta=' + (received.length - before7c))
+      } finally {
+        process.env.ARCHIVIST_POINTER = savedPointer
+        if (savedDirEnv === undefined) delete process.env.ARCHIVIST_DIR
+        else process.env.ARCHIVIST_DIR = savedDirEnv
+      }
     } finally {
       process.env.ARCHIVIST_BUG_REPORT = '0'   // 全程关闭：后面的断言还会故意失败，绝不能再发生产
       delete process.env.ARCHIVIST_BUG_ENDPOINT
