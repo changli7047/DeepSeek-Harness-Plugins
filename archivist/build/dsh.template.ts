@@ -51,10 +51,14 @@ export function apply(ctx: Context): void {
         schema: { type: 'string' },
         render: (_args, value) => [{ type: 'text', text: value }],
       },
-      timeoutMs: 30000,
+      // A tool may exceed the default budget (archivist_index embeds a cold
+      // corpus); the table declares its own timeout when it needs one.
+      timeoutMs: Number((tool as { timeoutMs?: number }).timeoutMs) || 30000,
       isConcurrencySafe: () => false,
       async execute(args) {
-        return String(runTool(tool, (args ?? {}) as Record<string, unknown>))
+        // Tools that reach the ML sidecar (search/evidence) return a Promise; sync
+        // tools return a string. Awaiting either is correct at the adapter boundary.
+        return String(await runTool(tool, (args ?? {}) as Record<string, unknown>))
       },
     }))
   }

@@ -1,0 +1,53 @@
+{
+  "name": "archivist intent gold (40 hand-labelled queries)",
+  "workspaceNote": "手工按语义标注；类别集合来自 core/mod-intent.mjs: aggregation | current-state | timeline | explanation | lookup。用于测规则准确率（目标 ≥85%），不是检索 gold。",
+  "generatedAt": "2026-10-22",
+  "authoredBy": "impl-eval（人工标注；未用分类器反推）",
+  "classes": ["aggregation", "current-state", "timeline", "explanation", "lookup"],
+  "cases": [
+    { "id": "a1", "query": "一共多少个关隘", "intent": "aggregation" },
+    { "id": "a2", "query": "how many chunks were embedded for the 10M corpus", "intent": "aggregation" },
+    { "id": "a3", "query": "项目里总共有几座城", "intent": "aggregation" },
+    { "id": "a4", "query": "统计一下 wiki 页面数量", "intent": "aggregation" },
+    { "id": "a5", "query": "全国图一共有多少条道路", "intent": "aggregation" },
+    { "id": "a6", "query": "多少条官道有名字", "intent": "aggregation" },
+    { "id": "a7", "query": "R29 到 R32 一共几个版本", "intent": "aggregation" },
+    { "id": "a8", "query": "总共几次劫寨", "intent": "aggregation" },
+
+    { "id": "c1", "query": "现在全国图是多少格", "intent": "current-state" },
+    { "id": "c2", "query": "当前默认的嵌入模型是什么", "intent": "current-state" },
+    { "id": "c3", "query": "最新一次全国图落地是哪个版本", "intent": "current-state" },
+    { "id": "c4", "query": "目前 dense 通道默认开还是关", "intent": "current-state" },
+    { "id": "c5", "query": "截至 2026-10-21 地图尺寸是多少", "intent": "current-state" },
+    { "id": "c6", "query": "现在生产配置里 rerank 默认开吗", "intent": "current-state" },
+    { "id": "c7", "query": "当前 ZMAX 是多少", "intent": "current-state" },
+    { "id": "c8", "query": "最新的草图版本号", "intent": "current-state" },
+
+    { "id": "t1", "query": "全国图是什么时候定成 204×208 的", "intent": "timeline" },
+    { "id": "t2", "query": "R26 基线是哪一天取的证", "intent": "timeline" },
+    { "id": "t3", "query": "营寨语义更正发生在什么时候", "intent": "timeline" },
+    { "id": "t4", "query": "第一次全国地图重做立项是什么时候", "intent": "timeline" },
+    { "id": "t5", "query": "后来为什么又改成 50×50", "intent": "timeline" },
+    { "id": "t6", "query": "map 版本演进的时间顺序", "intent": "timeline" },
+    { "id": "t7", "query": "从 v2 到 v7 草图分别哪天产出", "intent": "timeline" },
+    { "id": "t8", "query": "二〇二六年十月十九日发生了什么", "intent": "timeline" },
+
+    { "id": "e1", "query": "为什么木场必须建在林地", "intent": "explanation" },
+    { "id": "e2", "query": "dense 通道为什么会让 multihop 变差", "intent": "explanation" },
+    { "id": "e3", "query": "为什么 rerank 默认关", "intent": "explanation" },
+    { "id": "e4", "query": "how does the evidence pack avoid prompt injection", "intent": "explanation" },
+    { "id": "e5", "query": "为什么全国图要按 10km 一格", "intent": "explanation" },
+    { "id": "e6", "query": "营寨为什么不是城池", "intent": "explanation" },
+    { "id": "e7", "query": "why does sync throttle only apply to large libraries", "intent": "explanation" },
+    { "id": "e8", "query": "为什么贴吧直连会 403", "intent": "explanation" },
+
+    { "id": "l1", "query": "R31 的版本号", "intent": "lookup" },
+    { "id": "l2", "query": "木场选址与林地唯一性约束", "intent": "lookup" },
+    { "id": "l3", "query": "BUILD_RANGE", "intent": "lookup" },
+    { "id": "l4", "query": "check_layers.py", "intent": "lookup" },
+    { "id": "l5", "query": "seed 5584", "intent": "lookup" },
+    { "id": "l6", "query": "e5-small 的维度", "intent": "lookup" },
+    { "id": "l7", "query": "王涛户 光伏支架", "intent": "lookup" },
+    { "id": "l8", "query": "营寨的本质", "intent": "lookup" }
+  ]
+}

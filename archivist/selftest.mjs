@@ -6,6 +6,7 @@ import {
   initWorkspace, attachWorkspace, listSources, writePage, readPages, searchWiki,
   lintWiki, appendLog, readLog, estimateTokens, statusWorkspace, backupWorkspace,
   commitWorkspace, parsePage, rebuildIndex, scanCorpus, runTool, TOOLS, reportBug,
+  classifyIntent, intentRoutingHint,
 } from './core/archivist.mjs'
 import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
 import { spawnSync } from 'node:child_process'
@@ -80,15 +81,15 @@ try {
   ok('read missing page throws', threw)
 
   // 6. search
-  const s1 = searchWiki(ws, 'Transformer', 10)
+  const s1 = await searchWiki(ws, 'Transformer', 10)
   ok('search latin hits concept', s1.includes('concepts/Transformer-概念.md'), s1.split('\n')[0])
-  const s2 = searchWiki(ws, '笔记', 10)
+  const s2 = await searchWiki(ws, '笔记', 10)
   ok('search cjk hits source page', s2.includes('sources/note1.md'), s2.split('\n')[0])
-  const s3 = searchWiki(ws, 'zzz_nothing_zzz', 10)
+  const s3 = await searchWiki(ws, 'zzz_nothing_zzz', 10)
   ok('search empty result message', s3.includes('no match'))
-  const sr = searchWiki(ws, 'Note1', 10, 'raw')
+  const sr = await searchWiki(ws, 'Note1', 10, 'raw')
   ok('search scope raw hits source file', sr.includes('raw/note1.md'), sr.split('\n')[0])
-  const sa = searchWiki(ws, 'Transformer', 20, 'all')
+  const sa = await searchWiki(ws, 'Transformer', 20, 'all')
   ok('search scope all merges wiki+raw', sa.includes('concepts/Transformer-概念.md') && sa.includes('raw/note1.md'), sa.split('\n')[0])
 
   // 7. lint (links resolve by page title; add one deliberate orphan page)
@@ -127,11 +128,11 @@ try {
   ok('supersede: new page records supersedes', readFileSync(path.join(ws, 'wiki', 'concepts', 'replacement.md'), 'utf8').includes('supersedes: concepts/孤立页.md'), wS)
   const oldTxt = readFileSync(path.join(ws, 'wiki', 'concepts', '孤立页.md'), 'utf8')
   ok('supersede: old page flipped to superseded', oldTxt.includes('status: superseded') && oldTxt.includes('superseded_by: concepts/replacement.md'))
-  const supSearch = searchWiki(ws, '孤立页', 10, 'wiki')
+  const supSearch = await searchWiki(ws, '孤立页', 10, 'wiki')
   ok('supersede: search annotates replacement', supSearch.includes('已被'), supSearch.split('\n')[0])
   const wR = writePage(ws, { path: 'syntheses/trust-low.md', retract: true, retractReason: '测试撤回' })
   ok('retract: page marked retracted', readFileSync(path.join(ws, 'wiki', 'syntheses', 'trust-low.md'), 'utf8').includes('status: retracted'), wR)
-  const retSearch = searchWiki(ws, 'Trust Low', 10, 'wiki')
+  const retSearch = await searchWiki(ws, 'Trust Low', 10, 'wiki')
   ok('retract: excluded from search', !retSearch.includes('trust-low'), retSearch.split('\n')[0])
   const lS = lintWiki(ws)
   ok('lint: supersede chain clean', !lS.includes('supersede-'), lS.split('\n')[0])
@@ -146,7 +147,7 @@ try {
   ok('scan: coverage statement', sc.includes('覆盖声明'))
   const sc0 = scanCorpus(ws, 'zzscan-not-present', 'all')
   ok('scan: zero-match coverage note', sc0.includes('total occurrences: 0') && sc0.includes('未命中不等于不存在'), sc0.split('\n')[0])
-  const hint = searchWiki(ws, '列出全部笔记', 5, 'wiki')
+  const hint = await searchWiki(ws, '列出全部笔记', 5, 'wiki')
   ok('search: exhaustive-intent hint', hint.includes('穷尽/计数类意图检测'), hint.split('\n').slice(-1)[0])
 
   // 10. status
@@ -157,21 +158,51 @@ try {
 
   // 10b. tokenizer: symbol-bearing latin phrases stay searchable
   writeFileSync(path.join(ws, 'raw', 'note3.md'), '# Note3\nB+ Tree 原理；O(log n) 复杂度。\n')
-  const st1 = searchWiki(ws, 'B+ Tree', 10, 'raw')
+  const st1 = await searchWiki(ws, 'B+ Tree', 10, 'raw')
   ok('search keeps symbol phrase (B+ Tree)', st1.includes('raw/note3.md'), st1.split('\n')[0])
-  const st2 = searchWiki(ws, 'O(log n)', 10, 'raw')
+  const st2 = await searchWiki(ws, 'O(log n)', 10, 'raw')
   ok('search keeps symbol phrase (O(log n))', st2.includes('raw/note3.md'), st2.split('\n')[0])
 
   // 10c. raw cache: transparency + invalidation on change
-  const c1 = searchWiki(ws, 'cacheprobe', 10, 'raw')
+  const c1 = await searchWiki(ws, 'cacheprobe', 10, 'raw')
   ok('cache: token absent before write', c1.includes('no match'))
   writeFileSync(path.join(ws, 'raw', 'note4.md'), '# Note4\ncacheprobe content.\n')
-  const c2 = searchWiki(ws, 'cacheprobe', 10, 'raw')
+  const c2 = await searchWiki(ws, 'cacheprobe', 10, 'raw')
   ok('cache: new file found after write', c2.includes('raw/note4.md'), c2.split('\n')[0])
   await new Promise((r) => setTimeout(r, 60))
   writeFileSync(path.join(ws, 'raw', 'note4.md'), '# Note4\ncompletely different content now, longer than before.\n')
-  const c3 = searchWiki(ws, 'cacheprobe', 10, 'raw')
+  const c3 = await searchWiki(ws, 'cacheprobe', 10, 'raw')
   ok('cache: invalidated after file change', c3.includes('no match'), c3.split('\n')[0])
+
+  // 10d. sync throttle (mod-retrieval.mjs rt_SYNC_THROTTLE_MIN_FILES): small workspaces keep
+  // the old "sync on every search" path, large ones may skip the directory scan. Both sides are
+  // asserted here so raising/lowering the threshold cannot silently change freshness behaviour.
+  const rtMod = await import('./core/mod-retrieval.mjs')
+  ok('sync throttle: threshold constant is exported', rtMod.rt_SYNC_THROTTLE_MIN_FILES === 400, 'got ' + rtMod.rt_SYNC_THROTTLE_MIN_FILES)
+  const smallFirst = (await rtMod.hybridSearch(ws, 'Transformer', { limit: 5 })).diagnostics
+  const smallSm = (await rtMod.hybridSearch(ws, 'Transformer', { limit: 5 })).diagnostics
+  ok('sync throttle: small workshop runs under the file-level stamp (sync only when the stamp changed)',
+    smallSm.syncPolicy.throttleActive === true && smallSm.timings.syncMode !== 'absent',
+    JSON.stringify({ first: smallFirst.timings.syncMode, second: smallSm.timings.syncMode, policy: smallSm.syncPolicy }))
+  writeFileSync(path.join(ws, 'raw', 'note1.md'), '# Note1\nTransformer 是一种架构。 deep-stamp freshness probe\n')
+  const smallEdit = (await rtMod.hybridSearch(ws, 'Transformer', { limit: 5 })).diagnostics
+  ok('sync throttle: an in-place content edit forces a full sync', smallEdit.timings.syncMode === 'full', JSON.stringify(smallEdit.timings))
+  const osMod = await import('node:os')
+  const bigWs = path.join(osMod.tmpdir(), 'archivist-sync-throttle-' + Date.now())
+  cleanupPaths.push(bigWs)
+  initWorkspace(bigWs)
+  for (let i = 0; i < 401; i++) {
+    writeFileSync(path.join(bigWs, 'raw', 'big-' + String(i).padStart(3, '0') + '.md'), '# big ' + i + '\nzzthrottleprobe file ' + i + '\n')
+  }
+  const bigSm1 = (await rtMod.hybridSearch(bigWs, 'zzthrottleprobe', { limit: 5 })).diagnostics
+  const bigSm2 = (await rtMod.hybridSearch(bigWs, 'zzthrottleprobe', { limit: 5 })).diagnostics
+  ok('sync throttle: large workspace skips the per-query scan after the first sync',
+    bigSm1.timings.syncMode === 'full' && bigSm2.timings.syncMode !== 'full' && bigSm2.syncPolicy.throttleActive === true,
+    JSON.stringify({ first: bigSm1.timings.syncMode, second: bigSm2.timings.syncMode, policy: bigSm2.syncPolicy }))
+  const bigSm3 = (await rtMod.hybridSearch(bigWs, 'zzthrottleprobe', { limit: 5, forceSync: true })).diagnostics
+  ok('sync throttle: forceSync bypasses the throttle', bigSm3.timings.syncMode === 'full', JSON.stringify(bigSm3.timings))
+  const bigSyncStats = rtMod.syncNow(bigWs)
+  ok('sync throttle: syncNow() performs a sync outside hybridSearch', bigSyncStats && typeof bigSyncStats === 'object', JSON.stringify(bigSyncStats))
 
   // 11. backup
   const b1 = backupWorkspace(ws)
@@ -187,7 +218,65 @@ try {
   const pr = parsePage('---\ntitle: A\ntags: [x, y]\n---\nbody')
   ok('frontmatter parse title', pr.fm.title === 'A' && Array.isArray(pr.fm.tags) && pr.fm.tags.length === 2, JSON.stringify(pr.fm))
   ok('token estimate positive', estimateTokens('中文abc') >= 2)
-  ok('tools table complete', TOOLS.length === 13 && TOOLS.every((t) => t.name.startsWith('archivist_')), 'count=' + TOOLS.length)
+  ok('tools table complete', TOOLS.length === 16 && TOOLS.every((t) => t.name.startsWith('archivist_')), 'count=' + TOOLS.length)
+  const toolNames = new Set(TOOLS.map((t) => t.name))
+  ok('tools table: P1 evidence/verify tools are registered',
+    toolNames.has('archivist_evidence') && toolNames.has('archivist_verify'), [...toolNames].join(','))
+  ok('tools table: P4 claims tool is registered', toolNames.has('archivist_claim'), [...toolNames].join(','))
+  ok('tools table: every tool declares a run function and an object schema',
+    TOOLS.every((t) => typeof t.run === 'function' && t.schema && t.schema.type === 'object'))
+
+  // 12b. Phase 5: deterministic intent routing (routing, not understanding).
+  ok('intent: aggregation cue is routed', classifyIntent('列出全部三国志建造的决策').intent === 'aggregation', JSON.stringify(classifyIntent('列出全部三国志建造的决策')))
+  ok('intent: english aggregation cue is routed', classifyIntent('how many decisions do we have').intent === 'aggregation', JSON.stringify(classifyIntent('how many decisions do we have')))
+  ok('intent: current-state cue is routed', classifyIntent('全国地图现在接入引擎的是什么尺寸').intent === 'current-state', JSON.stringify(classifyIntent('全国地图现在接入引擎的是什么尺寸')))
+  ok('intent: timeline cue is routed', classifyIntent('全国地图尺寸什么时候改过').intent === 'timeline', JSON.stringify(classifyIntent('全国地图尺寸什么时候改过')))
+  ok('intent: plain lookup stays lookup', classifyIntent('BUILD_RANGE 的值').intent === 'lookup', JSON.stringify(classifyIntent('BUILD_RANGE 的值')))
+  ok('intent: routing hints exist for routed intents and not for lookup',
+    intentRoutingHint('aggregation').includes('archivist_scan') && intentRoutingHint('current-state').includes('claims')
+      && intentRoutingHint('timeline').includes('按事件时间') && intentRoutingHint('lookup') === '')
+  const aggSearch = await searchWiki(ws, '列出全部 zzbig', 5, 'raw')
+  ok('intent: aggregation routing is surfaced in search output', aggSearch.includes('聚合问题') || aggSearch.includes('穷尽/计数类意图'), aggSearch.slice(-260))
+
+  // 12c. Phase 4: claims layer (append-only JSONL + validity + conflicts).
+  writePage(ws, { path: 'concepts/ClaimProbe.md', title: 'ClaimProbe', type: 'concept', body: '# ClaimProbe\n\n全国地图尺寸是 204×208，已在引擎跑通。\n', index: false })
+  const claimSearch = await searchWiki(ws, '204×208 全国地图尺寸', 5, 'wiki')
+  const anchorMatch = /(wiki\/[^\s@]+@[0-9a-f]{8}#c\d+\[\d+:\d+\])/.exec(claimSearch)
+  ok('claims: an anchor can be obtained from search output', !!anchorMatch, claimSearch.slice(0, 200))
+  const claimAnchor = anchorMatch ? anchorMatch[1] : 'wiki/concepts/ClaimProbe.md#c0'
+  const claimTool = TOOLS.find((t) => t.name === 'archivist_claim')
+  const claimAdd = String(await runTool(claimTool, {
+    action: 'add', workspace: ws, file: 'probe',
+    claims: [{ subject: 'ClaimProbe', predicate: '全国地图尺寸', object: '204×208', anchor: claimAnchor, quote: '204×208' }],
+  }))
+  ok('claims: a claim with a verified anchor+quote is stored', claimAdd.includes('added 1'), claimAdd)
+  ok('claims: same claim is idempotent', String(await runTool(claimTool, {
+    action: 'add', workspace: ws, file: 'probe',
+    claims: [{ subject: 'ClaimProbe', predicate: '全国地图尺寸', object: '204×208', anchor: claimAnchor, quote: '204×208' }],
+  })).includes('skipped 1'))
+  const badClaim = String(await runTool(claimTool, {
+    action: 'add', workspace: ws, file: 'probe',
+    claims: [{ subject: 'ClaimProbe', predicate: '不存在的属性', object: 'x', anchor: claimAnchor, quote: '这句话原文里没有' }],
+  }))
+  ok('claims: a claim whose quote is not in the anchor is rejected', badClaim.includes('rejected 1'), badClaim)
+  const conflictClaim = String(await runTool(claimTool, {
+    action: 'add', workspace: ws, file: 'probe',
+    claims: [{ subject: 'ClaimProbe', predicate: '全国地图尺寸', object: '50×50', anchor: claimAnchor, quote: '全国地图尺寸', validFrom: '2026-01-01' }],
+  }))
+  ok('claims: a conflicting active value is reported, not silently accepted', conflictClaim.includes('冲突'), conflictClaim)
+  const conflicts = String(await runTool(claimTool, { action: 'conflicts', workspace: ws }))
+  ok('claims: conflicts lists the contradicting values', conflicts.includes('204×208') && conflicts.includes('50×50'), conflicts)
+  const listed = String(await runTool(claimTool, { action: 'list', workspace: ws, subject: 'ClaimProbe' }))
+  ok('claims: list returns the active claim with its anchor', listed.includes('204×208') && listed.includes('↳'), listed)
+  const claimId = /c_[0-9a-f]+/.exec(listed)?.[0] || ''
+  const superseded = String(await runTool(claimTool, { action: 'supersede', workspace: ws, claimId, newObject: '50×50', validFrom: '2026-06-01', reason: '地图重做' }))
+  ok('claims: supersede closes the old claim', superseded.includes('superseded') || superseded.includes('→'), superseded)
+  const afterSupersede = String(await runTool(claimTool, { action: 'list', workspace: ws, subject: 'ClaimProbe' }))
+  ok('claims: the superseded value is no longer the active one', !afterSupersede.includes('= 204×208'), afterSupersede)
+  const retracted = String(await runTool(claimTool, { action: 'retract', workspace: ws, claimId: (/(c_[0-9a-f]+)/.exec(afterSupersede) || [])[1] || claimId, reason: 'probe' }))
+  ok('claims: retract is accepted and idempotent-safe', retracted.includes('retracted') || retracted.includes('failed'), retracted)
+  const reindexed = String(await runTool(claimTool, { action: 'reindex', workspace: ws }))
+  ok('claims: reindex rebuilds from the append-only JSONL', /reindexed: \d+ claim/.test(reindexed), reindexed)
 
   // 13. coverage honesty: files skipped by scan/search must be disclosed (A1)
   writeFileSync(path.join(ws, 'raw', 'big-skip.md'), 'x'.repeat(2 * 1024 * 1024 + 1000) + '\nzzbig\nzzbig\n')
@@ -200,7 +289,7 @@ try {
     !bigScan.includes('完整清单') && !bigScan.includes('以上为全部命中文件') && bigScan.includes('未扫描'),
     bigScan.split('\n').slice(-2).join(' / '))
   ok('scan: count stays exact over the files it did scan', /total occurrences: 1/.test(bigScan) && bigScan.includes('raw/skip-probe.md'), bigScan.split('\n')[0])
-  const bigSearch = searchWiki(ws, 'zzbig', 10, 'raw')
+  const bigSearch = await searchWiki(ws, 'zzbig', 10, 'raw')
   ok('search: skipped raw files are disclosed', bigSearch.includes('未纳入检索') && bigSearch.includes('raw/big-skip.md') && bigSearch.includes('raw/page.html'), bigSearch)
 
   // 13b. a 0-byte file is scanned-but-empty (not a gap); a non-empty filtered file still is
@@ -476,7 +565,7 @@ try {
   ok('write: cleaning a junk line must not promote it into a live key',
     junkPage.fm.status === undefined && dupKeys(junkRaw).length === 0
       && junkRaw.includes('# status: retracted') && !/[ \t]# status: retracted/.test(junkRaw)
-      && searchWiki(capWs, 'findme', 5, 'wiki').includes('concepts/Junk.md'),
+      && (await searchWiki(capWs, 'findme', 5, 'wiki')).includes('concepts/Junk.md'),
     `status=${JSON.stringify(junkPage.fm.status)} dupes=${JSON.stringify(dupKeys(junkRaw))}`)
   ok('write: a cleaned column-0 line survives repeated updates instead of being swallowed',
     junkRaw1.replace('token 2', 'X') === junkRaw.replace('token 3', 'X') && /^# status: retracted$/m.test(junkRaw),
@@ -491,7 +580,7 @@ try {
   const escPage = parsePage(escRaw)
   ok('write: a bad character inside a key name cannot promote it into a live key',
     escPage.fm.status === undefined && String(escPage.fm.trust) === 'low'
-      && searchWiki(capWs, 'esc 2', 5, 'wiki').includes('concepts/Esc.md')
+      && (await searchWiki(capWs, 'esc 2', 5, 'wiki')).includes('concepts/Esc.md')
       && !/^status : retracted$/m.test(escRaw),
     `status=${JSON.stringify(escPage.fm.status)} trust=${JSON.stringify(escPage.fm.trust)}`)
 
@@ -788,7 +877,7 @@ try {
     goodRaw.includes('goodtok body v2')
       && readdirSync(concDir).filter((f) => /^good\./i.test(f)).join('|') === 'Good.md'
       && readFileSync(path.join(capWs, 'wiki', 'index.md'), 'utf8').includes('Good.md')
-      && searchWiki(capWs, 'goodtok', 5, 'wiki').includes('concepts/Good.md'),
+      && (await searchWiki(capWs, 'goodtok', 5, 'wiki')).includes('concepts/Good.md'),
     readdirSync(concDir).filter((f) => /^good\./i.test(f)).join('|'))
 
   let dotThrew = ''
@@ -1091,7 +1180,7 @@ try {
   //     策略：无歧义别名直接映射（回执里注明）；拼错的名字给 did you mean（不静默猜）
   {
     const w = TOOLS.find((t) => t.name === 'archivist_write')
-    const outAlias = String(runTool(w, { file_path: 'sources/AliasProbe.md', title: 'AliasProbe', type: 'source', body: 'from file_path\n', workspace: capWs }))
+    const outAlias = String(await runTool(w, { file_path: 'sources/AliasProbe.md', title: 'AliasProbe', type: 'source', body: 'from file_path\n', workspace: capWs }))
     ok('params: file_path is accepted as an alias of path, and the receipt says so',
       outAlias.includes('created wiki/sources/AliasProbe.md') && outAlias.includes('alias file_path→path')
         && existsSync(path.join(capWs, 'wiki', 'sources', 'AliasProbe.md')),

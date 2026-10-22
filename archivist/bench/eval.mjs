@@ -33,17 +33,17 @@ for (const c of set.cases) {
       pass = got === Number(c.expect)
       detail = `count=${got} (expected ${c.expect})`
     } else if (c.mode === 'nomatch') {
-      const out = String(searchWiki(dir, c.query, c.limit || 10, c.scope || 'wiki'))
+      const out = String(await searchWiki(dir, c.query, c.limit || 10, c.scope || 'wiki'))
       pass = out.includes('no match')
       detail = pass ? 'no match — correct' : out.split('\n')[0]
     } else if (c.mode === 'annotated') {
-      const out = String(searchWiki(dir, c.query, 10, c.scope || 'wiki'))
+      const out = String(await searchWiki(dir, c.query, 10, c.scope || 'wiki'))
       const lines = out.split('\n').filter((l) => /^\d+\. \[/.test(l)).slice(0, 3)
       const hit = lines.find((l) => (c.expect || ['已被']).some((e) => l.includes(e))) || ''
       pass = hit !== ''
       detail = (hit || lines[0] || '(no match)').slice(0, 100)
     } else {
-      const out = String(searchWiki(dir, c.query, 10, c.scope || 'wiki'))
+      const out = String(await searchWiki(dir, c.query, 10, c.scope || 'wiki'))
       const lines = out.split('\n').filter((l) => /^\d+\. \[/.test(l))
       const take = c.mode === 'top1' ? lines.slice(0, 1) : lines.slice(0, 3)
       const joined = take.join('\n')

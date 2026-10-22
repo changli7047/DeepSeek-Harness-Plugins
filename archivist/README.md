@@ -1,9 +1,10 @@
 # archivist
 
-给 AI Agent 的**本地长期知识库**插件：把对话、文档与资料增量编译成互相链接的 markdown wiki，跨会话、跨宿主检索与复用。**纯本地、零密钥、零网络、零第三方依赖**。
+给 AI Agent 的**本地长期知识库**插件：把对话、文档与资料增量编译成互相链接的 markdown wiki，跨会话、跨宿主检索与复用。**纯本地、零密钥、零网络、零第三方依赖**（P1 起检索走 `<workspace>/.index/` 下的 SQLite 派生索引，可整删重建；P2 的向量通道是可选独立 Python 侧车，默认关闭）。
 
 - 形态：**OpenCode v2 插件**（工具命名空间 `archivist.*`）+ **DeepSeek Harness (dsh) 插件**（工具 `archivist_*`），外加可选的**对话蒸馏钩子**（双端）。
 - 与 `windows-tools` 不同：本插件不依赖 PowerShell，直接运行在宿主内置的 Node/TS 运行时上。
+- 证据链：检索结果带**稳定锚点** `wiki/foo.md@<版本8位>#c<块号>[起:止]`；`archivist_evidence` 出带编号 `[S#]` 的证据包；`archivist_verify` 核验引用是否真的落在被引片段里。
 
 ---
 
@@ -19,20 +20,23 @@
 | 备份与版本 | 内置**免 git 快照备份**（时间戳目录 + manifest + 轮转）；有 git 时可选 `archivist_commit` |
 | 可检索的规模 | `archivist_search` 支持 `scope: wiki / raw / all`，CJK 二元组 + 短语 + IDF 稀有度加权 |
 
-## 工具清单（13 个）
+## 工具清单（16 个）
 
 | dsh 工具 | OpenCode 工具 | 作用 |
 |---|---|---|
 | `archivist_init` | `archivist.init` | 显式路径建库并注册指针（重装系统不丢：挂回即可） |
 | `archivist_attach` | `archivist.attach` | 挂回已有库（换机/换目录） |
-| `archivist_status` | `archivist.status` | 概览：页数、token 估算、源状态、最近日志；**新装尚未建库时返回建库指引而不是报错** |
+| `archivist_status` | `archivist.status` | 概览：页数、token 估算、源状态、最近日志、**检索索引统计、向量通道状态**；**新装尚未建库时返回建库指引而不是报错** |
 | `archivist_sources` | `archivist.sources` | `raw/` 清单与摄入状态（new / changed / ingested，哈希跟踪） |
-| `archivist_search` | `archivist.search` | 检索（词法级）：标题+全文，CJK 二元组/整短语/紧凑变体/IDF |
+| `archivist_search` | `archivist.search` | 检索（**chunk 级混合检索**）：SQLite FTS5 BM25 + 别名 + 精确 + 向量通道（可选 ML），RRF 融合 + 确定性重排 + 父段/同页多块交付；结果带**稳定锚点**与 heading 路径；意图路由提示（聚合/当前状态/时间线）；降级明示 |
+| `archivist_evidence` | `archivist.evidence` | **证据包**：一次拿到带编号 `[S1]…` 的证据块（锚点/标题/trust/status/日期），按 token 预算截断并明示截断点，附回答纪律；`deep: true` 为全局/聚合问题放大到最多 12 万 token 并提示代价；证据不足时给弃权信号与原因 |
+| `archivist_verify` | `archivist.verify` | **引用核验**：每条引用的锚点是否存在、版本是否过期、引文是否真的落在被引片段内、目标是否已撤回/替代；纯字符串核验（不做 NLI） |
+| `archivist_claim` | `archivist.claim` | **结构化事实（claims）**：subject/predicate/object + 生效区间 + 原文锚点；add/supersede/retract/list/conflicts/reindex；写入前强制校验锚点与引文，冲突不覆盖只报告 |
 | `archivist_scan` | `archivist.scan` | **全量精确扫描**：精确计数 + 命中文件清单（≤60 个全列；超出时只列前 60 个并明示`清单截断`，计数与文件数仍准确）+ 覆盖声明（穷尽/统计类问题专用，不做 top-K 截断）；被跳过的文件（>2MB、扩展名不在白名单的非空文件）如实计入声明 |
-| `archivist_read` | `archivist.read` | 读页（标题宽容解析、支持批量） |
+| `archivist_read` | `archivist.read` | 读页（标题宽容解析、支持批量）；**可直接读锚点**（`wiki/foo.md#c3` 或完整 `#c3[120:480]`），版本过期会明示；`expand: "parent"` 附父段上下文 |
 | `archivist_write` | `archivist.write` | 校验并写页：frontmatter 补全、索引自动重建、源标记、可选日志 |
-| `archivist_index` | `archivist.index` | 确定性重建 `index.md`（根治目录漂移；wiki 根目录/未归类页进 `Other` 段，不再漏掉） |
-| `archivist_lint` | `archivist.lint` | 结构体检：断链/孤儿页/缺 frontmatter/重复标题/索引缺漏/高频未建页 |
+| `archivist_index` | `archivist.index` | 确定性重建 `index.md`（根治目录漂移；wiki 根目录/未归类页进 `Other` 段，不再漏掉），重建/同步检索索引；**配置了 ML 时顺带增量嵌入缺失的块**（首次冷嵌入可能几十秒到几分钟，工具超时已放宽到 10 分钟） |
+| `archivist_lint` | `archivist.lint` | 结构体检：断链/孤儿页/缺 frontmatter/重复标题/索引缺漏/高频未建页 + **检索索引漂移** |
 | `archivist_log` | `archivist.log` | 追加/读取时间线日志（`grep` 友好） |
 | `archivist_backup` | `archivist.backup` | 免 git 快照备份 + 轮转（建议 target 指向别的盘/云盘目录）；只轮转严格匹配快照命名的目录，同前缀的其它目录一律保留并在回执中列出 |
 | `archivist_commit` | `archivist.commit` | 可选：`git add + commit`（无 git 不影响使用）；只暂存/提交知识库目录内的改动，知识库嵌在别的仓库里时不会带上无关文件 |
@@ -44,6 +48,8 @@
 - **纠错永不覆盖历史**：`supersedes` 写替代页（旧页自动 `superseded`，检索降权并标注替代关系）；`retract` 撤回（检索排除）；`archivist_lint`/`archivist.lint` 校验替代链完整性
 - **穷尽类问题路由**：`archivist_scan`/`archivist.scan` 提供全量精确计数与命中文件清单（≤60 个全列，超出时明示`清单截断`与未显示条数、计数与文件数仍准确；附覆盖声明：被跳过的文件数量与原因一并列出，未扫描部分绝不冒称"完整清单"）；检索检测到穷尽/计数意图时会提示改用 scan
 - **导航页不得内嵌条目描述（实测教训）**：把 N 个条目的摘要抄进一张"总览页"会让它成为检索里的**吸铁石**。84 条真实语料实测：这样的总览页占据 **81/84** 条内容查询的第 1 名，正确页被挤到第 2 —— 人工题 **Top-1 命中率 23%**；只删掉描述正文（保留标题与链接）后升到 **77%**，内容类查询 **4% → 100%**，而 Top-3 完全不变。规则已写进工作区 `AGENTS.md` 模板；导航交给 `index.md`（插件维护、不参与检索）
+- **稳定锚点（P1 起）**：检索与证据包返回的每条结果都带 `wiki/foo.md@<整文件 sha256 前 8 位>#c<块号>[起:止]`。锚点是"内容寻址"的：文件一改，`archivist_read` 会明示**版本不匹配**而不是拿新内容冒充旧引用；`archivist_verify` 用同一套锚点判断"这句引文是否真的落在被引片段里"
+- **引用纪律（P1 起可机械核验）**：回答带引用时先 `archivist_evidence` 拿编号证据，再让每句挂 `[S#]`；交付前 `archivist_verify` 核验（锚点存在 / 版本未过期 / 引文命中 / 目标未撤回或替代）。核验只做字符串与状态检查，**不做语义蕴含**——它证明"引文确实在原文里"，不证明"结论确实由引文推出"
 
 ## 对话蒸馏钩子（可选组件）
 
@@ -138,7 +144,7 @@ cd <本仓库>\archivist
 node selftest.mjs
 ```
 
-预期输出：**`204 passed, 0 failed`**（完整跑，含 `bench:` 2 条、`commit scoping` 组与 14 条失败上报断言）。在**禁止 node 起子进程**的环境（如受限沙箱）里，那 3 组会被记为 SKIP、退出码仍为 0：两组对同一条件判定一致，**SKIP 不是失败**。覆盖：初始化/幂等挂回、源状态追踪、中文写页、索引重建、中英检索、路径安全（含 `sourceFile`/`supersedes` 越界）、**被跳过文件的覆盖披露（有跳过时不得出现 totality 声明，计数须限定在"已扫描"范围）**、**0 字节占位符不稀释覆盖声明**、**截断清单不冒称"全部"**、**wiki 根目录页进索引**、**index href 定宽编码可逆且单射（含 `%`、括号、Unicode 空白文件名仍能往返，两页永不共用一条 href）**、**index 容忍 `*`/`+`、多余空格等手工重排**、**frontmatter 往返是互逆的：含引号/反斜杠的值逐次字节稳定、带逗号的 tag 不被拆开、空列表项不被丢弃、更新永不产生重复键、块序列归一化为 flow 数组而嵌套映射/块标量/非 ASCII 键原样保留、行分隔符 U+2028/2029 被折成空格**、**只有"空值 / `|` `>` 指示符（含 `|2-` 这类缩进与 chomping 组合）/ 未闭合 flow 列表或映射 / 带行尾注释的块头"才算块头（`trust: low` 后面跟缩进行时那些行是游离行，会被拍平为注释而不是被折进标量）**、**行尾注释会被正确剥离：`raw: | # note` 仍是块头、`tags: [a] # note` 仍是列表、`"My Page" # note` 的值仍是 `My Page`，而引号内的 `#`（`"a #c"`）与跨行 flow 内的注释都不会变成数据**、**两种引号风格都被识别：`['a', 'b']` → `["a","b"]`，`['a,b']` 保持一项**、**空的块标量（`raw: |` 下面没有内容）读作空串而不是 `"|"`**、**`supersedes` 省略 `.md` 也能解析到目标（并因此逃不过自我替代/自管文件检查）**、**无键的 frontmatter 行一律拍平为列 0 注释 —— 既不会被前一个键吞掉、也不会在下次解析里升格成活键，且产出始终可被通用 YAML 解析器读取**、**`[a, ]` 的尾随逗号不会造出幻影空项（显式 `""` 仍保留）**、**lint 对"缩进却无父键"报 `unparseable-frontmatter`，且与解析器共用同一套块头判定（跨行 flow、注释块头、空行后的块内容均不误报）**、**孤代理项被拒绝（不会被静默写成 U+FFFD）**、**`tags` 非数组时 `archivist_search` 不再整体抛错**、**YAML 指示符开头的值（含 `,`）、类型样式标量（`null`/`~`/`0x10`/`.inf`/时间戳/数字）以及含 `: `/` #` 的值一律加引号**、**显式传入的字段会覆盖"原样保留的块"（不会静默写不进去）**、**frontmatter 里的控制字符（含 C1 与非字符）：显式传入时拒绝并指名码位，继承自旧页时清洗（值内替换为空格；块内行按其缩进**原地注释**）并在回执里披露 `cleaned N control char(s)`**、**lint 会对"缩进却无父键"的 frontmatter 报 `unparseable-frontmatter`**、**页面路径与 supersedes 目标按"解析后的路径 + win32 大小写折叠"判定身份：`Log.md`、`./log.md`、`LOG.MD`、`./concepts/A.md` 这类等价拼写都不会绕过自管文件保护与自我 supersede 检查**、**块占用的 `status`/`retractReason`/`superseded_by`/`last_updated` 在 retract / supersede 时仍能正确写入**、**方括号标题往返仍是字符串**、**title/summary 里的换行不撕裂 frontmatter、retract 理由的换行不破坏日志行式契约**、**手写的非法 `trust`/`status` 不会卡死页面更新（只校验显式传入值）**、**`{title, type}` 组合可用且 `type` 只进 frontmatter**、**显式非法 `type` 被拒绝**、**`rel`/`index` 已声明（脚本与老调用方仍可达）**、**未声明参数被拒绝**、lint、**备份轮转只删快照目录**、**写入原子性（拒绝写入不留半成品页）**、**commit 不越界暂存**、**bench 空库非零退出**、**数值 0 不被当假值**、**trust 分级/替代/撤回**、**穷尽扫描**、符号短语分词、缓存失效等。
+预期输出：**`231 passed, 0 failed`**（完整跑，含 `bench:` 2 条、`commit scoping` 组与 14 条失败上报断言）。在**禁止 node 起子进程**的环境（如受限沙箱）里，那 3 组会被记为 SKIP、退出码仍为 0：两组对同一条件判定一致，**SKIP 不是失败**。覆盖：初始化/幂等挂回、源状态追踪、中文写页、索引重建、中英检索、路径安全（含 `sourceFile`/`supersedes` 越界）、**被跳过文件的覆盖披露（有跳过时不得出现 totality 声明，计数须限定在"已扫描"范围）**、**0 字节占位符不稀释覆盖声明**、**截断清单不冒称"全部"**、**wiki 根目录页进索引**、**index href 定宽编码可逆且单射（含 `%`、括号、Unicode 空白文件名仍能往返，两页永不共用一条 href）**、**index 容忍 `*`/`+`、多余空格等手工重排**、**frontmatter 往返是互逆的：含引号/反斜杠的值逐次字节稳定、带逗号的 tag 不被拆开、空列表项不被丢弃、更新永不产生重复键、块序列归一化为 flow 数组而嵌套映射/块标量/非 ASCII 键原样保留、行分隔符 U+2028/2029 被折成空格**、**只有"空值 / `|` `>` 指示符（含 `|2-` 这类缩进与 chomping 组合）/ 未闭合 flow 列表或映射 / 带行尾注释的块头"才算块头（`trust: low` 后面跟缩进行时那些行是游离行，会被拍平为注释而不是被折进标量）**、**行尾注释会被正确剥离：`raw: | # note` 仍是块头、`tags: [a] # note` 仍是列表、`"My Page" # note` 的值仍是 `My Page`，而引号内的 `#`（`"a #c"`）与跨行 flow 内的注释都不会变成数据**、**两种引号风格都被识别：`['a', 'b']` → `["a","b"]`，`['a,b']` 保持一项**、**空的块标量（`raw: |` 下面没有内容）读作空串而不是 `"|"`**、**`supersedes` 省略 `.md` 也能解析到目标（并因此逃不过自我替代/自管文件检查）**、**无键的 frontmatter 行一律拍平为列 0 注释 —— 既不会被前一个键吞掉、也不会在下次解析里升格成活键，且产出始终可被通用 YAML 解析器读取**、**`[a, ]` 的尾随逗号不会造出幻影空项（显式 `""` 仍保留）**、**lint 对"缩进却无父键"报 `unparseable-frontmatter`，且与解析器共用同一套块头判定（跨行 flow、注释块头、空行后的块内容均不误报）**、**孤代理项被拒绝（不会被静默写成 U+FFFD）**、**`tags` 非数组时 `archivist_search` 不再整体抛错**、**YAML 指示符开头的值（含 `,`）、类型样式标量（`null`/`~`/`0x10`/`.inf`/时间戳/数字）以及含 `: `/` #` 的值一律加引号**、**显式传入的字段会覆盖"原样保留的块"（不会静默写不进去）**、**frontmatter 里的控制字符（含 C1 与非字符）：显式传入时拒绝并指名码位，继承自旧页时清洗（值内替换为空格；块内行按其缩进**原地注释**）并在回执里披露 `cleaned N control char(s)`**、**lint 会对"缩进却无父键"的 frontmatter 报 `unparseable-frontmatter`**、**页面路径与 supersedes 目标按"解析后的路径 + win32 大小写折叠"判定身份：`Log.md`、`./log.md`、`LOG.MD`、`./concepts/A.md` 这类等价拼写都不会绕过自管文件保护与自我 supersede 检查**、**块占用的 `status`/`retractReason`/`superseded_by`/`last_updated` 在 retract / supersede 时仍能正确写入**、**方括号标题往返仍是字符串**、**title/summary 里的换行不撕裂 frontmatter、retract 理由的换行不破坏日志行式契约**、**手写的非法 `trust`/`status` 不会卡死页面更新（只校验显式传入值）**、**`{title, type}` 组合可用且 `type` 只进 frontmatter**、**显式非法 `type` 被拒绝**、**`rel`/`index` 已声明（脚本与老调用方仍可达）**、**未声明参数被拒绝**、lint、**备份轮转只删快照目录**、**写入原子性（拒绝写入不留半成品页）**、**commit 不越界暂存**、**bench 空库非零退出**、**数值 0 不被当假值**、**trust 分级/替代/撤回**、**穷尽扫描**、符号短语分词、缓存失效等。
 
 > **从旧版本升级后请跑一次 `archivist_index`**：index.md 的 href 自本版起改为**定宽转义**（`(`/`)`/`%`/空白 → `%0028` 之类）。旧索引里的字面字符在新版 lint 下会短暂显示为 `index-missing`/`index-broken`，一次重建即恢复规范形式（不是死路）。
 
@@ -166,7 +172,17 @@ node selftest.mjs
 
 ## 限制与卸载
 
-- **检索是词法级**（子串 + 统计加权）：同义改写（如"互斥机制"找 synchronized）命中有限；语义级需求待接向量/qmd
+- **检索是混合式的，向量通道可选**：词法通道（SQLite FTS5 BM25 + 元数据身份）永远可用；配置了 ML 侧车（见下）时再加**向量通道**（e5-small ONNX，独立 Python 进程，CPU）。人工金标（72 题，62 可回答，`bench/gold/`）实测，两个口径都报：
+  - **交付口径**（同页任意交付块含金标引文）：词法 **77.4%** → +向量 **83.9%** → +向量+特征重排 **85.5%**
+  - **best-chunk 口径**（每页只取排名第一的块）：77.4% → 75.8% → 75.8%（更严，衡量"第一块选得准不准"）
+  缺口主要在 multihop / aggregation / old-fact；交叉编码器重排已实现但**默认关**（侧车性能未达标，见 `docs/p3-contract.md`）
+- **向量通道是可选依赖，默认不装**：需要 Python + `onnxruntime` + 两个 ONNX 模型（约 200MB），由**人**按 [`ml/README.md`](ml/README.md) 装一次；插件**不自动下载**、不联网。没装/没配时检索自动只用词法通道并在 `archivist_status` 里写明
+- **claims 是"带原文锚点的结构化断言"**：`archivist_claim` 只存不改历史，冲突只报告不覆盖；插件不做抽取、不做语义矛盾判断（同 subject+predicate 不同 object 即视为冲突）
+- **`deep: true` 的证据包**最多到 12 万 token（常规 6 万上限），输出会先告诉你代价；插件不做 map-reduce（无 LLM）
+- **证据包有 token 预算**（默认 24000）：截断会明示"在 S{n} 处截断"，不会假装给全了
+- **弃权信号是词面口径，不是语义口径**：证据包 `diagnostics.sufficient` 用三种**绝对量**判定（查询里的数字/版本/ID/英文长词必须逐字出现 → 硬标识覆盖率；绝对 RRF 融合分下限；无硬标识时候选块数量下限）。人工金标 72 题实测：**不可回答正确弃权 60%（6/10）、可回答误拒 1.6%（1/62）**。文档 §4 的 85% 弃权目标**未达到**——漏判的 4 条都是"主题页存在、所问的那条属性不存在"，词面与可回答题不可分；实测任何词面规则提到 85%+ 都会带来 25–50% 误拒。语义型弃权要等 claims/实体层或 NLI（Phase 3+）
+- **索引版本**：`.index` 目录里的库带 `schema_version`；分块器/索引器逻辑升级时该版本会变，打开时自动整库重建（派生数据，代价是首次检索变慢）。升级后若发现分块行为与旧库不一致，删掉 `.index` 再检索即可
+- **引用核验不做语义蕴含**：`archivist_verify` 通过只代表"引文确实出现在被引片段里"，不代表结论由引文推出；需要语义判断时由模型自己读原文
 - 单次回答质量受模型窗口限制（检索 + 重合成）；超大库建议先用 `archivist_search` 缩小范围再 `archivist_read`
 - **参数名严格校验 + 自我纠正**：传未声明的参数（例如把 `retractReason` 拼成 `retractReasonn`）会直接报错并列出已声明参数名，**不再静默忽略**。**缺必填参数同样给可执行报错**（`archivist_attach '{}'` → `missing required parameter(s) "path" — declared: path`），不再把 `undefined` 渗进 `path.resolve` 抛 `TypeError`（真实上报曾把这种调用记成 crash/high 级）。为了让调用方一次就能改对，还做了两件事：①**无歧义的通用别名直接映射并在回执里注明**（`file_path`/`filePath`/`filepath`/`filename` → `path`；`content`/`markdown` → `body`）—— 别的工具族（如 Claude Code 的 Write/Edit）习惯用 `file_path`，实测有真实上报就是因为这个拼写丢了一次写入；②近似拼错给 **`did you mean "path"?`** 提示（编辑距离 + 按 `_` 拆段比对），但**绝不猜着改**；同时给正确名与别名会明确拒绝（`pass only one of them`）。dsh 的工具参数根结构上是开放对象（`defineTool` 的 `parameters` 是"隐含开放根"），OpenCode 侧另有 schema 校验，因此这道校验由插件入口统一做
 - 蒸馏钩子只**提醒**，写入由 Agent 决定；状态文件可删（会重新触发首次询问）
@@ -175,15 +191,25 @@ node selftest.mjs
 
 ## 维护与构建
 
-- `core/archivist.mjs` 是**唯一逻辑源头**；改动后运行：
+- 逻辑源在 `core/`：`archivist.mjs`（入口 / CRUD / 工具表）+ `mod-*.mjs`（分块、SQLite 索引、混合检索、证据包、引用核验）。改动后运行：
   ```powershell
-  node build/build.mjs     # 重生成 opencode/index.ts 与 dsh/archivist.ts（断言 13 个工具注册）
+  node build/build.mjs     # 把模块内联成自包含插件，重生成 opencode/index.ts 与 dsh/archivist.ts
+  ```
+  构建器断言：16 个工具注册、无残留相对 import、`node --check` 通过、**顶层重名会报出是哪两个文件**（模块内部辅助符号必须带 `ch_/ix_/rt_/ev_/vf_/mv_/cl_` 前缀）、**每个工具 schema 必须能过宿主的 `defineTool`**（缺 `additionalProperties` 等会让所有工具注册失败）。
+- 本机部署到 dsh（profile patch 从 dsh 源码仓库的 `scratch-plugin/src/` 加载）：
+  ```powershell
+  node build/deploy.mjs   # 覆盖前自动备份、复制后校验 sha256；生效需重启 dsh 宿主
   ```
 - 两个钩子文件与 `bench/` 为静态工具，直接编辑
 - 基准与统计：
   ```powershell
   node bench/bench-queries.mjs "D:/archivist" "bench-report.md"   # 20 条查询延迟分位报告
   node bench/rawstats.mjs "D:/archivist/raw"                      # 语料规模/字符/token 统计
+  node bench/metrics.mjs bench/gold/gold-real.json <hits.json>    # 人工金标：span/page Recall、MRR、nDCG
+  node bench/ablate.mjs <库> bench/gold/gold-real.json --md ablate.md --dump hits.json   # 通道消融
+  node bench/gold-pack.mjs <库> bench/gold/gold-real.json         # 证据包口径 Recall / token / 延迟
+  node bench/gen-corpus.mjs --tokens 1000000 --out D:/corpora/1m  # 可复现合成规模语料（含针位金标）
+  node bench/plugin-smoke.mjs                                    # 部署后冒烟：生成物与部署副本哈希一致 + 宿主模块解析下 16 工具注册 + 9 条行为断言（不重启宿主）
   ```
 - 分类评测（纯本地、无依赖；期望值生成时冻结，语料大改后重新生成）：
   ```powershell

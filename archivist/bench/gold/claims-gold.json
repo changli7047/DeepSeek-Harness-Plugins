@@ -1,0 +1,77 @@
+{
+  "workspace": "D:/archivist-work/claims-fixture",
+  "generatedAt": "2026-10-22T04:37:48.817Z",
+  "stats": {
+    "total": 11,
+    "active": 9,
+    "superseded": 1,
+    "retracted": 1,
+    "pages": 2
+  },
+  "cases": [
+    {
+      "id": "q1",
+      "kind": "current",
+      "query": "全国地图现在接入引擎的是什么尺寸",
+      "expectSubject": "三国志建造",
+      "expectPredicate": "全国地图尺寸",
+      "expectObject": "204×208"
+    },
+    {
+      "id": "q2",
+      "kind": "current",
+      "query": "全国地图一共多少城",
+      "expectSubject": "三国志建造",
+      "expectPredicate": "全国地图城池数",
+      "expectObject": "42 城"
+    },
+    {
+      "id": "q3",
+      "kind": "temporal",
+      "query": "截至 2026-10-18 全国地图尺寸是多少",
+      "asOf": "2026-10-18",
+      "expectPredicate": "全国地图尺寸",
+      "expectObject": "50×50",
+      "note": "old value valid at that date"
+    },
+    {
+      "id": "q4",
+      "kind": "temporal",
+      "query": "2026-12-01 时全国地图尺寸",
+      "asOf": "2026-12-01",
+      "expectPredicate": "全国地图尺寸",
+      "expectObject": "204×208"
+    },
+    {
+      "id": "q5",
+      "kind": "corrected",
+      "query": "全国图关隘数量",
+      "expectPredicate": "全国图关隘数",
+      "expectObject": "26 关"
+    },
+    {
+      "id": "q6",
+      "kind": "corrected",
+      "query": "渲染瓶颈是什么",
+      "expectPredicate": "渲染瓶颈",
+      "expectObject": "sceneOf 每帧重建 hex prim"
+    }
+  ],
+  "asOfOld": [
+    "全国地图尺寸=50×50"
+  ],
+  "asOfNow": [
+    "TURN_LIMIT=480",
+    "ZMAX=12",
+    "全国图关隘数=26 关",
+    "全国图渡口数=5 渡",
+    "全国图道路数=72 条",
+    "全国地图城池数=42 城",
+    "全国地图尺寸=204×208",
+    "校验门状态=234 全绿",
+    "渲染瓶颈=sceneOf 每帧重建 hex prim"
+  ],
+  "conflicts": [],
+  "supersede": true,
+  "retract": true
+}

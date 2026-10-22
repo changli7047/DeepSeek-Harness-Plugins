@@ -36,7 +36,8 @@ export default Plugin.define({
           options: { namespace: "archivist", codemode: true },
           execute: async (input: unknown) => {
             try {
-              return asText(String(runTool(tool, (input ?? {}) as Record<string, unknown>)))
+              // Sync tools return a string, ML-backed tools return a Promise.
+              return asText(String(await runTool(tool, (input ?? {}) as Record<string, unknown>)))
             } catch (error) {
               throw new Error(error instanceof Error ? error.message : String(error))
             }

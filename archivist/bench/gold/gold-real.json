@@ -1,0 +1,645 @@
+{
+  "name": "archivist P1 gold set (hand-authored)",
+  "version": 1,
+  "workspace": "D:\\archivist-work\\baseline-copy",
+  "workspaceNote": "真实库副本（51 raw + 50 wiki 页，截止 2026-10-21）。只读；检索用 scope=wiki（默认）。",
+  "generatedAt": "2026-10-21",
+  "authoredBy": "impl-eval — 逐页读原文后人工判定，未使用任何检索/打分代码反推 gold",
+  "method": [
+    "每条 goldAnchors[].path 为工作区相对 posix 路径；quote 为该页正文里能唯一锚定答案的原文片段（逐字复制，只做空白归一化后比较），用于 span 命中。",
+    "quote 优先选正文（非标题、非 frontmatter summary），以降低与 wiki/index.md、wiki/log.md 摘要重复导致的路径混淆。",
+    "multihop 条目带 requireAll:true：两个 anchor 都必须出现在 top-20 才算命中（默认只需任一 anchor）。",
+    "不可回答条目 goldAnchors 为空、answerable:false；引擎无显式拒答通道，故 metrics 用「无命中或 top1 显示分 < 阈值」作代理，单列报告，不计入 recall。",
+    "⚠ 语料最早日期 2026-10-15、最新 2026-10-21：不存在「一年前」的真实事实，old-fact 类别因此用『被后续轮次明确覆盖的旧值』代替（旧值仍可在旧页/旧日志里检索到），notes 逐条注明。",
+    "⚠ 本副本没有 status:retracted / superseded 的页面，故合同 §8.3 的纠错维度在 gold 里只能覆盖『内容级更正』，不能覆盖『页面级 retract/supersede』。"
+  ],
+  "categoryGuide": {
+    "exact-ident": "精确标识符/版本号/常量名/数字串，查询里保留原 token",
+    "paraphrase": "语义改写，与原文用词尽量不重合",
+    "multihop": "需要两页证据；requireAll:true",
+    "temporal": "当前状态/最新版本/截至日期",
+    "corrected": "页面记录了自我更正或被推翻的结论",
+    "aggregation": "聚合数字（条数、页数、倍数、占比等）",
+    "old-fact": "已过时的旧值（真实语料无一年前数据，见 method 第 5 条）",
+    "mixed": "中英/数字混排查询",
+    "unanswerable": "语料中确实没有答案；代理指标只算弃答"
+  },
+  "cases": [
+    {
+      "id": "x01",
+      "query": "BUILD_RANGE 的值是多少",
+      "category": "exact-ident",
+      "goldAnchors": [{ "path": "wiki/concepts/木场选址与林地唯一性约束.md", "quote": "const BUILD_RANGE = 2;" }],
+      "answerable": true,
+      "notes": "引擎常量原文在代码块里；答案=2 格（六边形距离）。"
+    },
+    {
+      "id": "x02",
+      "query": "R31 的版本号前缀是什么",
+      "category": "exact-ident",
+      "goldAnchors": [{ "path": "wiki/syntheses/三国志建造-R31-第二轮审查三条.md", "quote": "CA24B813" }],
+      "answerable": true,
+      "notes": "R31 = CA24B813…（339280 字节）；同页还给了 R30 464902E1…。"
+    },
+    {
+      "id": "x03",
+      "query": "山地重画交付的 R28 完整 sha256 是多少",
+      "category": "exact-ident",
+      "goldAnchors": [{ "path": "wiki/syntheses/三国志建造-山地不超格与拾取返工.md", "quote": "5F3292272AEB4C1C7AA08AF21609491CC72FD3801BAB14D1BF67EB75F96E57D8" }],
+      "answerable": true,
+      "notes": "全库唯一出现完整哈希的地方；其余页只写 5F329227…。"
+    },
+    {
+      "id": "x04",
+      "query": "什么工具把军师落子的往返次数从 8–12 次降到 2 次",
+      "category": "exact-ident",
+      "goldAnchors": [{ "path": "wiki/syntheses/三国志建造-给AI军师做MCP服务器.md", "quote": "8–12 次降到 2 次" }],
+      "answerable": true,
+      "notes": "MCP 服务器（sanguo-mcp.mjs）；该页同时强调墙钟没降。"
+    },
+    {
+      "id": "x05",
+      "query": "全国图渲染卡顿的根因是每帧重建多少个 hex prim",
+      "category": "exact-ident",
+      "goldAnchors": [{ "path": "wiki/syntheses/三国志建造-全国图渲染提速-静态图层缓存.md", "quote": "JS 每帧重建 42,432 个 hex prim" }],
+      "answerable": true,
+      "notes": "42,432 = 204×208；答「不是 GPU 问题是 JS 重建」也算对，anchor 只锁数字句。"
+    },
+    {
+      "id": "x06",
+      "query": "关隘与山脉层 v4 草图里画了哪些要素",
+      "category": "exact-ident",
+      "goldAnchors": [{ "path": "wiki/syntheses/三国志建造-全国图关隘与山脉层v4.md", "quote": "42 城 + 60 条官道 + 26 关 + 42 山脉名" }],
+      "answerable": true,
+      "notes": "文件名 docs/assets/全国图_草图_v4.png 也在同一行。"
+    },
+    {
+      "id": "x07",
+      "query": "text-to-cad 的更新源放在哪个目录",
+      "category": "exact-ident",
+      "goldAnchors": [{ "path": "wiki/syntheses/text-to-cad-install.md", "quote": "text-to-cad-src" }],
+      "answerable": true,
+      "notes": "C:\\Users\\长离\\.dsh\\text-to-cad-src（--branch latest，0.7.21）。"
+    },
+    {
+      "id": "x08",
+      "query": "贴吧考据帖的楼中楼有多少条",
+      "category": "exact-ident",
+      "goldAnchors": [{ "path": "wiki/sources/三国志11贴吧-大汉十三州一部考据帖.md", "quote": "楼中楼 228 条" }],
+      "answerable": true,
+      "notes": "注意与「157 张原图 / 35 条勘误」区分；source 页与 synthesis 页数字相同但表述不同。"
+    },
+
+    {
+      "id": "p01",
+      "query": "为什么部队疲劳不用时间结算来表达",
+      "category": "paraphrase",
+      "goldAnchors": [{ "path": "wiki/syntheses/三国志建造-驻扎机制：在营与在外.md", "quote": "把睡觉翻译成空间约束，而不是时间结算" }],
+      "answerable": true,
+      "notes": "第三版方案；前两版（时间结算）被用户否掉。"
+    },
+    {
+      "id": "p02",
+      "query": "为什么最后没有采用斜投影",
+      "category": "paraphrase",
+      "goldAnchors": [{ "path": "wiki/concepts/WebGL-2.5D渲染与程序化音频.md", "quote": "工程最后采用" }],
+      "answerable": true,
+      "notes": "理由：斜投影要改逻辑层公用的 hexCenter 与输入路径，会推翻已验证的拾取与 188 项断言。"
+    },
+    {
+      "id": "p03",
+      "query": "能不能直接用像素颜色把参考图里的河流认出来",
+      "category": "paraphrase",
+      "goldAnchors": [{ "path": "wiki/syntheses/三国志建造-按参考图重做地图-100x100.md", "quote": "像素分类路线被否定" }],
+      "answerable": true,
+      "notes": "水系与山体阴影在像素上不可分（阴影比水还蓝），且 15.2% 被 UI 压住。"
+    },
+    {
+      "id": "p04",
+      "query": "浏览器直接访问为什么拿不到贴吧长帖正文",
+      "category": "paraphrase",
+      "goldAnchors": [{ "path": "wiki/concepts/贴吧全文抓取-CDP法.md", "quote": "HTTP 直连 403 + 前端 SPA + 接口带 sign" }],
+      "answerable": true,
+      "notes": "该页先列五条死路再给 CDP 法；403/安全验证与 sign 绑定是根因。"
+    },
+    {
+      "id": "p05",
+      "query": "出完工程图想检查 PDF 排版用什么办法",
+      "category": "paraphrase",
+      "goldAnchors": [{ "path": "wiki/concepts/cadgen-workflow-gotchas.md", "quote": "用 PyMuPDF 栅格化再看图" }],
+      "answerable": true,
+      "notes": "不能用 playwright 浏览器审 PDF（坑 2）。"
+    },
+    {
+      "id": "p06",
+      "query": "为什么用 qsave 而不是自己拼 Frontend",
+      "category": "paraphrase",
+      "goldAnchors": [{ "path": "wiki/concepts/ezdxf-drawing-notes.md", "quote": "qsave 内部把 figure 尺寸、axes、finalize 都串好了" }],
+      "answerable": true,
+      "notes": "手搓 Frontend 易漏尺寸/轴/finalize 串联。"
+    },
+    {
+      "id": "p07",
+      "query": "多智能体一次把太多图交给同一个人读会怎样",
+      "category": "paraphrase",
+      "goldAnchors": [{ "path": "wiki/concepts/大目验任务的分片与分段落盘.md", "quote": "交给一个实现者（D 组）" }],
+      "answerable": true,
+      "notes": "52 张图 → 中途失败、零落盘；结论是一人 ≤20 张并分段落盘。"
+    },
+    {
+      "id": "p08",
+      "query": "技能工具对任何技能名都报错，说明环境哪里不对",
+      "category": "paraphrase",
+      "goldAnchors": [{ "path": "wiki/concepts/dsh-skill-catalog-not-published.md", "quote": "is unknown or no longer available" }],
+      "answerable": true,
+      "notes": "根因：本机 DSH 从不发布面向模型的技能目录；绕过办法是直接 read SKILL.md。"
+    },
+    {
+      "id": "p09",
+      "query": "单文件离线游戏想用真材质又不想买素材，怎么绕开版权",
+      "category": "paraphrase",
+      "goldAnchors": [{ "path": "wiki/concepts/2D手绘风转向与精灵拾取.md", "quote": "ambientCG" }],
+      "answerable": true,
+      "notes": "ambientCG 的 Public Domain/CC0 材质 → 缩到 256px → base64 data URI 内联，保住单文件离线。"
+    },
+    {
+      "id": "p10",
+      "query": "第三方审查报告里最有价值的那条问题严重到什么程度",
+      "category": "paraphrase",
+      "goldAnchors": [{ "path": "wiki/syntheses/三国志建造-代码审查复核.md", "quote": "它最有价值的一条是真的且在我们的盲区里" }],
+      "answerable": true,
+      "notes": "指 #1 玩家可移动敌军；我们的 selfcheck 202/0 覆盖不到。"
+    },
+
+    {
+      "id": "m01",
+      "query": "王涛户支架为什么同时改了柱网跨度和组件列数",
+      "category": "multihop",
+      "requireAll": true,
+      "goldAnchors": [
+        { "path": "wiki/syntheses/pv-rework-round1.md", "quote": "18 列 + 3400 → 1569.5 ✗ 超限 70 mm" },
+        { "path": "wiki/syntheses/pv-wangtao-design.md", "quote": "组件 18 列 × 4 排 = 72 块 = 56.52 kWp" }
+      ],
+      "answerable": true,
+      "notes": "组合冲突：18 列与 3400 跨距不能同时满足 1.5 m 挑出上限 → 柱网拉到 20600（非均分），最终 72 块/56.52 kWp。"
+    },
+    {
+      "id": "m02",
+      "query": "全国图落地时 219 年的三方归属是多少，跟立项初稿差在哪",
+      "category": "multihop",
+      "requireAll": true,
+      "goldAnchors": [
+        { "path": "wiki/syntheses/三国志建造-全国地图v2落地.md", "quote": "曹 23 / 刘 11（含上庸）/ 孙 8" },
+        { "path": "wiki/syntheses/三国志建造-全国地图重做立项与地形v1.md", "quote": "曹 23 / 刘 10 / 孙 9" }
+      ],
+      "answerable": true,
+      "notes": "落地版把上庸划归刘备（219 年刘封、孟达取上庸），刘 10→11、孙 9→8。"
+    },
+    {
+      "id": "m03",
+      "query": "六边形网格改造顺带修的那个致命缺陷，木场那条的修法是什么",
+      "category": "multihop",
+      "requireAll": true,
+      "goldAnchors": [
+        { "path": "wiki/syntheses/三国志建造-六边形网格改造.md", "quote": "开局建不出木场" },
+        { "path": "wiki/concepts/木场选址与林地唯一性约束.md", "quote": "保证每方营地 2 格内必有一片林地" }
+      ],
+      "answerable": true,
+      "notes": "缺陷：地图生成清掉营地 3 格内的树而建造范围只有 2 格 → 木收入永为 0、无限僵持。"
+    },
+    {
+      "id": "m04",
+      "query": "山地返工交付的版本，在代码审查复核里被审的是哪一版，复核发现了什么",
+      "category": "multihop",
+      "requireAll": true,
+      "goldAnchors": [
+        { "path": "wiki/syntheses/三国志建造-山地不超格与拾取返工.md", "quote": "5F3292272AEB4C1C7AA08AF21609491CC72FD3801BAB14D1BF67EB75F96E57D8" },
+        { "path": "wiki/syntheses/三国志建造-代码审查复核.md", "quote": "把一条既有账当成新发现" }
+      ],
+      "answerable": true,
+      "notes": "R28 就是被审对象；复核结论：opencode 最有价值那条为真且是盲区，但它没跑 regress.mjs，把既有账当新发现。"
+    },
+    {
+      "id": "m05",
+      "query": "原著里城池和营寨各管什么，为什么营寨不能当亡国判定",
+      "category": "multihop",
+      "requireAll": true,
+      "goldAnchors": [
+        { "path": "wiki/syntheses/三国志建造-营寨语义更正.md", "quote": "城池＝根本（钱粮军马），营寨＝移动的野战据点" },
+        { "path": "wiki/syntheses/营寨的本质：驻止.md", "quote": "便携版" }
+      ],
+      "answerable": true,
+      "notes": "更正页给职能分工；本质页给「便携版/驻止」原则。"
+    },
+    {
+      "id": "m06",
+      "query": "换快模型和改用 MCP 服务器这两件事，共同说明对局瓶颈在哪",
+      "category": "multihop",
+      "requireAll": true,
+      "goldAnchors": [
+        { "path": "wiki/syntheses/三国志建造-模型测速与换快模型.md", "quote": "端到端每手从 210 秒压到 15.6 秒（13.5 倍）" },
+        { "path": "wiki/syntheses/三国志建造-给AI军师做MCP服务器.md", "quote": "但墙钟没变快，瓶颈是模型自身生成速度" }
+      ],
+      "answerable": true,
+      "notes": "往返降 4 倍墙钟不变；换模型反而 13.5× → 瓶颈是模型生成速度。"
+    },
+    {
+      "id": "m07",
+      "query": "cadgen 装的是哪个版本、装在什么位置",
+      "category": "multihop",
+      "requireAll": true,
+      "goldAnchors": [
+        { "path": "wiki/syntheses/text-to-cad-install.md", "quote": "text-to-cad-src" },
+        { "path": "wiki/log.md", "quote": "text-to-cad 0.7.21 装到 ~/.dsh/skills" }
+      ],
+      "answerable": true,
+      "notes": "0.7.21；技能包在 ~/.dsh/skills/text-to-cad，源码在 ~/.dsh/text-to-cad-src。"
+    },
+    {
+      "id": "m08",
+      "query": "311 考据帖的要点密度，跟本项目的差距在哪",
+      "category": "multihop",
+      "requireAll": true,
+      "goldAnchors": [
+        { "path": "wiki/concepts/三国志11地图设计原则.md", "quote": "45 个要点（关 10 + 港 35）" },
+        { "path": "wiki/syntheses/三国志建造-311地图考据skill全帖升级.md", "quote": "本项目 4 城 5 要点" }
+      ],
+      "answerable": true,
+      "notes": "311：42 城 45 要点、三线分布；本项目：4 城 5 要点且东南零要点。"
+    },
+
+    {
+      "id": "t01",
+      "query": "全国地图现在接入引擎的是什么尺寸",
+      "category": "temporal",
+      "goldAnchors": [{ "path": "wiki/syntheses/三国志建造-全国地图v2落地.md", "quote": "50×50 荆州四城图 → 204×208 全国 42 城图，已在引擎里跑通" }],
+      "answerable": true,
+      "notes": "当前态：204×208、42 城；50×50 是上一张图。"
+    },
+    {
+      "id": "t02",
+      "query": "当前 national map 的地形图存在哪里、多少格",
+      "category": "temporal",
+      "goldAnchors": [{ "path": "wiki/syntheses/三国志建造-全国地图v2落地.md", "quote": "204×208 地形字符图" }],
+      "answerable": true,
+      "notes": "map.ts：204×208 地形字符图，42,432 格，新增 sea 不可通行。"
+    },
+    {
+      "id": "t03",
+      "query": "现在相机放缩上限 ZMAX 是多少",
+      "category": "temporal",
+      "goldAnchors": [{ "path": "wiki/syntheses/三国志建造-全国地图v2落地.md", "quote": "ZMAX` 3→12" }],
+      "answerable": true,
+      "notes": "R095 把 ZMAX 3→12（204 格宽时 zoom=1 每格约 5px）。"
+    },
+    {
+      "id": "t04",
+      "query": "按最新驻扎规则，部队在外面待几夜会散伙",
+      "category": "temporal",
+      "goldAnchors": [{ "path": "wiki/syntheses/三国志建造-驻扎机制：在营与在外.md", "quote": "满 3 夜粮尽兵散（溃散）" }],
+      "answerable": true,
+      "notes": "第三版规则：每过一夜 +1，满 3 夜溃散（不是扣血）；驻地半径 4 格。"
+    },
+    {
+      "id": "t05",
+      "query": "静态图层缓存那一版之后，测试门还全绿吗",
+      "category": "temporal",
+      "goldAnchors": [{ "path": "wiki/syntheses/三国志建造-全国图渲染提速-静态图层缓存.md", "quote": "234 全绿；tsc 通过" }],
+      "answerable": true,
+      "notes": "v2.0.1：gate 234 全绿 + tsc 通过 + 重开页面截图正常。"
+    },
+    {
+      "id": "t06",
+      "query": "山地重画最终交付的是哪个 R 版本",
+      "category": "temporal",
+      "goldAnchors": [{ "path": "wiki/syntheses/三国志建造-山地不超格与拾取返工.md", "quote": "基线 R26 → 交付" }],
+      "answerable": true,
+      "notes": "基线 R26 → 交付 R28；R27 只是美工轮。"
+    },
+    {
+      "id": "t07",
+      "query": "全国图草图最后一版往路网里加的是什么层",
+      "category": "temporal",
+      "goldAnchors": [{ "path": "wiki/syntheses/三国志建造-全国图间道层v7.md", "quote": "虚线＝无名间道（只求连通）" }],
+      "answerable": true,
+      "notes": "v7 在 60 条有名官道外加 12 条无名间道。"
+    },
+    {
+      "id": "t08",
+      "query": "全国图 v2 落地之后还有什么平衡问题没解决",
+      "category": "temporal",
+      "goldAnchors": [{ "path": "wiki/syntheses/三国志建造-全国地图v2落地.md", "quote": "曹 23 城独大" }],
+      "answerable": true,
+      "notes": "待办 M4/M6：AI 与节奏、平衡（曹 23 城独大）、注记渲染。"
+    },
+    {
+      "id": "t09",
+      "query": "换上快模型后每手耗时降到多少",
+      "category": "temporal",
+      "goldAnchors": [{ "path": "wiki/syntheses/三国志建造-模型测速与换快模型.md", "quote": "9.4 分钟" }],
+      "answerable": true,
+      "notes": "换模型后 36 手 9.4 分钟 = 每手 15.6 秒（原 210 秒/手）。"
+    },
+
+    {
+      "id": "c01",
+      "query": "营寨最初被设计成了什么，后来按原著改成了什么",
+      "category": "corrected",
+      "goldAnchors": [{ "path": "wiki/syntheses/三国志建造-营寨语义更正.md", "quote": "我把营寨当成了势力首都与亡国判定，与原著不符" }],
+      "answerable": true,
+      "notes": "正名为城池（征兵/钱粮/亡国判定），营寨改为野战寨（可下/可拔/可劫）。"
+    },
+    {
+      "id": "c02",
+      "query": "地图默认种子到底是多少（记录里曾经写错过）",
+      "category": "corrected",
+      "goldAnchors": [{ "path": "wiki/syntheses/三国志建造-代码审查复核.md", "quote": "默认种子是 2087" }],
+      "answerable": true,
+      "notes": "reset(seed){seed=seed||2087}；旧记录写「等价种子 0」是错的。"
+    },
+    {
+      "id": "c03",
+      "query": "为什么说 R29 的修复只是半成品",
+      "category": "corrected",
+      "goldAnchors": [{ "path": "wiki/syntheses/三国志建造-R30-step对齐收口.md", "quote": "独立验证者抓出来" }],
+      "answerable": true,
+      "notes": "只补了 runTo 一半，step 分支仍错阵营且静默；R30 抽 alignTo 收口。"
+    },
+    {
+      "id": "c04",
+      "query": "拔寨回收粮20木10 这条数值为什么被判抄错",
+      "category": "corrected",
+      "goldAnchors": [{ "path": "wiki/syntheses/三国志建造·机制考据第二轮（屯田-工事-资源-拔寨劫寨夜袭）.md", "quote": "无一例回收物资" }],
+      "answerable": true,
+      "notes": "原著 23 例拔寨全指拔营走人，撤退反而丢辎重；且与免费立寨构成套利。"
+    },
+    {
+      "id": "c05",
+      "query": "贴吧原帖把初平元年写成了哪一年，实际是哪一年",
+      "category": "corrected",
+      "goldAnchors": [{ "path": "wiki/sources/三国志11贴吧-大汉十三州一部考据帖.md", "quote": "实为 190 年；194 年是兴平元年" }],
+      "answerable": true,
+      "notes": "OP 把初平元年写成 194；读者第 237 楼纠正：初平元年=190，194=兴平元年。"
+    },
+    {
+      "id": "c06",
+      "query": "全国图 219 年归属在落地时改了哪一处",
+      "category": "corrected",
+      "goldAnchors": [{ "path": "wiki/syntheses/三国志建造-全国地图v2落地.md", "quote": "219 归属修订" }],
+      "answerable": true,
+      "notes": "上庸归刘（刘封、孟达 219 年取上庸）→ 刘 11 / 曹 23 / 孙 8（初稿 10/23/9）。"
+    },
+    {
+      "id": "c07",
+      "query": "v0.2 原著版推翻了 v0.1 的什么",
+      "category": "corrected",
+      "goldAnchors": [{ "path": "wiki/syntheses/三国志建造-v0.2-原著版.md", "quote": "核查推翻了 v0.1 的三处设计" }],
+      "answerable": true,
+      "notes": "用原著词频核查后重做兵种/工事/计略；数值标回目出处。"
+    },
+    {
+      "id": "c08",
+      "query": "六边形改造时顺带修掉的「木收入永远为 0」具体是什么原因",
+      "category": "corrected",
+      "goldAnchors": [{ "path": "wiki/syntheses/三国志建造-六边形网格改造.md", "quote": "木收入永远是 0（致命）" }],
+      "answerable": true,
+      "notes": "地图生成清掉营地 3 格内树，而建造范围只有 2 格 → 建不出木场 → 无限僵持。"
+    },
+
+    {
+      "id": "a01",
+      "query": "验证火攻前置条件时一共看了多少处放火",
+      "category": "aggregation",
+      "goldAnchors": [{ "path": "wiki/syntheses/三国志建造·机制考据第二轮（屯田-工事-资源-拔寨劫寨夜袭）.md", "quote": "全书 `放火` 66 处" }],
+      "answerable": true,
+      "notes": "66 处放火，没有一例「无人到场而火攻得逞」→ 前置条件站得住。"
+    },
+    {
+      "id": "a02",
+      "query": "全国图路网一共有多少条路（有名加无名）",
+      "category": "aggregation",
+      "goldAnchors": [{ "path": "wiki/syntheses/三国志建造-全国图间道层v7.md", "quote": "72 条路（60 有名 + 12 间道）端点全部接城" }],
+      "answerable": true,
+      "notes": "60 官道 + 12 间道 = 72；雁门道等边防道端点豁免。"
+    },
+    {
+      "id": "a03",
+      "query": "全国图里有多少条有名官道",
+      "category": "aggregation",
+      "goldAnchors": [{ "path": "wiki/syntheses/三国志建造-全国图官道层v3.md", "quote": "59 条路端点均落在城上" }],
+      "answerable": true,
+      "notes": "59 条（雁门道除外，是边防道）；v7 页按 60 条算，差异属命名口径。"
+    },
+    {
+      "id": "a04",
+      "query": "全国图 v2 里渡口有哪几个",
+      "category": "aggregation",
+      "goldAnchors": [{ "path": "wiki/syntheses/三国志建造-全国地图v2落地.md", "quote": "白马津/孟津/官渡/夏口港/江津港" }],
+      "answerable": true,
+      "notes": "26 关 + 5 渡；渡口贴水陆格。"
+    },
+    {
+      "id": "a05",
+      "query": "全国图比原来那张四城图大多少倍",
+      "category": "aggregation",
+      "goldAnchors": [{ "path": "wiki/syntheses/三国志建造-全国地图重做立项与地形v1.md", "quote": "（42,432 格，17×）" }],
+      "answerable": true,
+      "notes": "204×208=42,432 格 ≈ 17 倍（尺度页写 17.0×）。"
+    },
+    {
+      "id": "a06",
+      "query": "测速台一共筛了多少个模型配置、精测几个",
+      "category": "aggregation",
+      "goldAnchors": [{ "path": "wiki/syntheses/三国志建造-模型测速与换快模型.md", "quote": "筛了 55 个模型配置、整回合精测 14 个" }],
+      "answerable": true,
+      "notes": "55 筛 / 14 精测；只有 claude-haiku-5-5(17s) 与 space-bunny(35s) 够快。"
+    },
+    {
+      "id": "a07",
+      "query": "seed 5584 那局 27 条攻击令里打到城池的有几条",
+      "category": "aggregation",
+      "goldAnchors": [{ "path": "wiki/syntheses/三国志建造-AI对战经验蒸馏-seed5584.md", "quote": "27 条攻击令全部打在部队/工事上，打在城池上的 0 条" }],
+      "answerable": true,
+      "notes": "183 条军报；三家城池终局都 1000/1000 — 0 次攻城。"
+    },
+
+    {
+      "id": "o01",
+      "query": "王涛户光伏支架最初设计的组件数和装机容量",
+      "category": "old-fact",
+      "goldAnchors": [{ "path": "wiki/log.md", "quote": "68 块 785W（53.38 kWp）" }],
+      "answerable": true,
+      "notes": "⚠ 旧值：2026-10-15 初版；返修后为 18 列 72 块 56.52 kWp。语料无「一年前」数据，本类以被覆盖的旧值代替。"
+    },
+    {
+      "id": "o02",
+      "query": "全国图立项时 219 年归属的初稿怎么分",
+      "category": "old-fact",
+      "goldAnchors": [{ "path": "wiki/syntheses/三国志建造-全国地图重做立项与地形v1.md", "quote": "曹 23 / 刘 10 / 孙 9" }],
+      "answerable": true,
+      "notes": "⚠ 旧值（D5，标「待确认」）：落地版修订为上庸归刘 → 刘 11/孙 8。"
+    },
+    {
+      "id": "o03",
+      "query": "地图尺寸曾经定过多大，后来为什么改小",
+      "category": "old-fact",
+      "goldAnchors": [{ "path": "wiki/log.md", "quote": "地图改定 50×50（100×100 太大）" }],
+      "answerable": true,
+      "notes": "⚠ 旧事实链：100×100 方案 → 2026-10-17 改定 50×50 → 2026-10-21 全国图 204×208。"
+    },
+    {
+      "id": "o04",
+      "query": "R26 基线取证里关于默认种子的旧结论是什么",
+      "category": "old-fact",
+      "goldAnchors": [{ "path": "wiki/syntheses/三国志建造-代码审查复核.md", "quote": "等价种子 0" }],
+      "answerable": true,
+      "notes": "⚠ 旧结论（已更正）：旧页写「不传参 ⇒ 等价种子 0」，实为默认 2087。"
+    },
+    {
+      "id": "o05",
+      "query": "v0.1 骨架最终锁定的是即时制还是回合制",
+      "category": "old-fact",
+      "goldAnchors": [{ "path": "wiki/syntheses/三国志建造-v0.1-项目状态.md", "quote": "用户明确否决「即时制为主」" }],
+      "answerable": true,
+      "notes": "⚠ 旧决策：回合制为主（三国志11 骨架），即时制被用户否决；后续版本沿用。"
+    },
+    {
+      "id": "o06",
+      "query": "seed 5584 那局替换掉的旧局记录是哪个种子",
+      "category": "old-fact",
+      "goldAnchors": [{ "path": "wiki/syntheses/三国志建造-R32-代码复用与opencode对战.md", "quote": "旧局 2087 记录备份在" }],
+      "answerable": true,
+      "notes": "⚠ 旧局：2087（备份在 llm-runs/match/旧局-2087/），新局 seed 5584。"
+    },
+
+    {
+      "id": "mx01",
+      "query": "npm run gate 全绿对应的是哪一次地图落地",
+      "category": "mixed",
+      "goldAnchors": [{ "path": "wiki/syntheses/三国志建造-全国地图v2落地.md", "quote": "`npm run gate` 234 全绿" }],
+      "answerable": true,
+      "notes": "R095 全国地图 v2.0 落地；gate=check+layers+test，234 条全绿。"
+    },
+    {
+      "id": "mx02",
+      "query": "check_layers.py 的连通性验收怎么判",
+      "category": "mixed",
+      "goldAnchors": [{ "path": "wiki/syntheses/三国志建造-全国图关隘对位修复与图层自检v5.md", "quote": "42 城经路网 BFS 全连通" }],
+      "answerable": true,
+      "notes": "沿线 14 km 内有城即建边，从襄阳出发 BFS 全覆盖；26 关在路 0–3 km。"
+    },
+    {
+      "id": "mx03",
+      "query": "seed 5584 那局一共打了多少手多少回合",
+      "category": "mixed",
+      "goldAnchors": [{ "path": "wiki/syntheses/三国志建造-模型测速与换快模型.md", "quote": "57 手 = 19 个完整回合" }],
+      "answerable": true,
+      "notes": "57 手 = 19 回合；无一方破城，打满 guard 结束。"
+    },
+    {
+      "id": "mx04",
+      "query": "CC0 材质缩到多大再内联成 data URI",
+      "category": "mixed",
+      "goldAnchors": [{ "path": "wiki/concepts/2D手绘风转向与精灵拾取.md", "quote": "缩到 256px" }],
+      "answerable": true,
+      "notes": "1K 材质抽 Color 图 → 缩到 256px → 6 张 64KB → base64 data URI。"
+    },
+    {
+      "id": "mx05",
+      "query": "TURN_LIMIT 在全国图落地时从多少改到多少",
+      "category": "mixed",
+      "goldAnchors": [{ "path": "wiki/syntheses/三国志建造-全国地图v2落地.md", "quote": "240→480" }],
+      "answerable": true,
+      "notes": "240→480（15 年不够；尺度页估算全图要 400–600 回合）。"
+    },
+    {
+      "id": "mx06",
+      "query": "R32 那次重构把几份重复的胶水代码下沉了",
+      "category": "mixed",
+      "goldAnchors": [{ "path": "wiki/syntheses/三国志建造-R32-代码复用与opencode对战.md", "quote": "实测是七份" }],
+      "answerable": true,
+      "notes": "七份手抄胶水 → 引擎唯一来源 SG.applyOrder/advanceSide/describeTarget；规则本身从未被复制。"
+    },
+
+    {
+      "id": "u01",
+      "query": "王涛户支架所选逆变器的额定效率是多少",
+      "category": "unanswerable",
+      "goldAnchors": [],
+      "answerable": false,
+      "notes": "语料只写「组件电气串并联与逆变器配置」属未做项，没有任何逆变器型号或效率数据。"
+    },
+    {
+      "id": "u02",
+      "query": "三国志建造 v0.3 的攻击音效做了哪几个变体",
+      "category": "unanswerable",
+      "goldAnchors": [],
+      "answerable": false,
+      "notes": "v0.3 不存在（版本到 v0.2 + R32）；音效是另一条线且只有三变体，无 v0.3 之分。"
+    },
+    {
+      "id": "u03",
+      "query": "全国图 v3.1 的发布日期是哪天",
+      "category": "unanswerable",
+      "goldAnchors": [],
+      "answerable": false,
+      "notes": "草图版本是 v2/v3/v4/v5/v7，没有 v3.1，也没有「发布日期」这种记录。"
+    },
+    {
+      "id": "u04",
+      "query": "贴吧原帖第 158 张原图画的是哪座城",
+      "category": "unanswerable",
+      "goldAnchors": [],
+      "answerable": false,
+      "notes": "原图共 157 张（152 种画面），不存在第 158 张；也从未逐图映射城池。"
+    },
+    {
+      "id": "u05",
+      "query": "R33 修了哪几条审查意见",
+      "category": "unanswerable",
+      "goldAnchors": [],
+      "answerable": false,
+      "notes": "冻结链止于 R32（BB570BF9…），没有 R33。"
+    },
+    {
+      "id": "u06",
+      "query": "测速台上 claude-haiku-5-5 的上下文窗口有多大",
+      "category": "unanswerable",
+      "goldAnchors": [],
+      "answerable": false,
+      "notes": "测速台只记耗时（17s/手），从未测上下文窗口。"
+    },
+    {
+      "id": "u07",
+      "query": "全国图 42 城各自的驻军数量上限是多少",
+      "category": "unanswerable",
+      "goldAnchors": [],
+      "answerable": false,
+      "notes": "有 42 城归属与坐标，但从没有逐城驻军上限表。"
+    },
+    {
+      "id": "u08",
+      "query": "157 张原图的原始文件名清单在哪里",
+      "category": "unanswerable",
+      "goldAnchors": [],
+      "answerable": false,
+      "notes": "只记 157 张（assets/ 157 图 43 篇目），没有逐图文件名清单。"
+    },
+    {
+      "id": "u09",
+      "query": "cadgen 的 GPU 加速开关怎么开",
+      "category": "unanswerable",
+      "goldAnchors": [],
+      "answerable": false,
+      "notes": "cadgen 是 CPU 建模/出图，语料没有 GPU 加速选项；GPU 字样只出现在渲染/音频页。"
+    },
+    {
+      "id": "u10",
+      "query": "MySQL 的索引在哪个事务隔离级别下会失效",
+      "category": "unanswerable",
+      "goldAnchors": [],
+      "answerable": false,
+      "notes": "语料完全没有 MySQL/数据库内容（旧 bench-queries 里的 MySQL 查询与本库无关）。"
+    }
+  ]
+}

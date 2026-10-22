@@ -1,0 +1,5 @@
+# Archivist Phase 2 ML sidecar runtime (CPU only; no GPU packages).
+# Install into a dedicated venv — do NOT install these into the dsh host.
+numpy>=1.26,<3
+onnxruntime>=1.18,<2
+tokenizers>=0.19,<1

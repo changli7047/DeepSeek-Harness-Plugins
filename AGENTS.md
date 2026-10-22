@@ -18,9 +18,14 @@
 - `windows-tools` 运行在**严格后台模式**：宿主层不得出现任何前台能力（光标移动、前台键鼠注入、`SetForegroundWindow`/`SetActiveWindow` 等），动类工具必须带 `window`；新增能力前先读插件 README 的「严格后台」一节。
 - `windows-tools/opencode/index.ts` 直接引用同目录 `wt-host.ps1`；发布更新后
   使用方需要重新复制/重新克隆才能拿到新 host。
-- `archivist/core/archivist.mjs` 是 archivist 插件的唯一逻辑源头；改动后运行
-  `node archivist/build/build.mjs` 重新生成 `archivist/opencode/index.ts` 与 `archivist/dsh/archivist.ts`
-  （构建器自带断言：13 个工具注册，失败即中止）。
+- `archivist/core/` 是 archivist 插件的唯一逻辑源头，由 `core/archivist.mjs`（入口 / CRUD / 工具表）
+  + `core/mod-*.mjs`（分块、索引、检索、证据包、引用核验）组成；改动后运行
+  `node archivist/build/build.mjs` 重新生成 `archivist/opencode/index.ts` 与 `archivist/dsh/archivist.ts`。
+  构建器把模块内联成一个自包含文件，断言：工具注册数、无残留相对 import、`node --check` 通过、
+  顶层重名会报出是哪两个文件（模块内部辅助符号必须带 `ch_/ix_/rt_/ev_/vf_` 前缀）。
+- 本机部署：`node archivist/build/deploy.mjs` 把生成物复制到 dsh 源码仓库的
+  `scratch-plugin/src/archivist.ts`（profile patch 从那里加载）；覆盖前自动备份、复制后校验 sha256。
+  生效需要重启 dsh 宿主。**不要**把 patch 指向本仓库克隆目录（裸导入 `@deepseek-ai/dsh-tools` 会 `Cannot find module`）。
 - 保持每个插件 README 的四节结构：功能清单 / AI 安装 / 自检 / 限制与卸载。
 - 修改行为后，必须同步更新受影响插件 README 的说明与自检预期。
 

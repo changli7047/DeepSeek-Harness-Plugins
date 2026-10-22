@@ -1,0 +1,15 @@
+# Python sidecar bytecode (the sidecar is plain Python source, no build step)
+__pycache__/
+*.pyc
+
+# Derived search index / embeddings / local model checkouts — rebuildable, never commit
+archivist/.index/
+**/.index/
+
+# Local Python venv for the optional ML sidecar
+archivist/ml/.venv/
+archivist/ml-venv/
+
+# Snapshot backups written by archivist_backup
+**/.backups/
+archivist-*.jsonl.tmp

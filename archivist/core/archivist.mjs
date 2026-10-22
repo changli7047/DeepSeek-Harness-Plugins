@@ -19,6 +19,26 @@ import { spawnSync } from 'node:child_process'
 import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
+// Phase 1 modules. Dependency direction is one-way and enforced by build/build.mjs:
+// indexdb→chunks, retrieval→(chunks,indexdb), evidence→(chunks,retrieval), verify→chunks.
+import { chunkDocument, estimateTokens, parseAnchor } from './mod-chunks.mjs'
+import { openIndex, syncIndex, indexStats, indexDrift, indexRebuildNote } from './mod-indexdb.mjs'
+import { hybridSearch } from './mod-retrieval.mjs'
+import { buildEvidencePack } from './mod-evidence.mjs'
+import { verifyCitations, formatVerifyReport } from './mod-verify.mjs'
+import { embedPending, vectorStats, mlStatus } from './mod-vector.mjs'
+import { classifyIntent, intentRoutingHint, intentWantsClaims } from './mod-intent.mjs'
+import {
+  ensureClaimsSchema, claimsAdd, claimsSupersede, claimsRetract,
+  claimsList, claimsConflicts, claimsReindex, claimsStats, claimsForPack,
+} from './mod-claims.mjs'
+
+// Kept at its historical import site: scripts imported estimateTokens from the
+// core before Phase 1, and the definition now lives in mod-chunks.mjs.
+export { estimateTokens } from './mod-chunks.mjs'
+// Phase 5 intent classifier: re-exported so the selftest and eval harness can
+// check routing verdicts without importing an internal module directly.
+export { classifyIntent, intentRoutingHint } from './mod-intent.mjs'
 
 // ---------------------------------------------------------------- constants
 
@@ -33,7 +53,8 @@ const BACKUP_PREFIX = 'archivist-'
 const SNAPSHOT_RE = /^archivist-\d{8}-\d{9,}(-\d+)?$/
 const DEFAULT_KEEP = 10
 const READ_CHAR_CAP = 120000
-const EXCLUDE_RE = /(^|\/)(\.backups|\.git|node_modules)(\/|$)/
+// `.index` is the derived SQLite index (rebuildable, never backed up, never scanned).
+const EXCLUDE_RE = /(^|\/)(\.backups|\.git|node_modules|\.index)(\/|$)/
 const RAW_EXTS = /\.(md|txt|json|csv|ya?ml)$/i
 const RAW_SIZE_CAP = 2 * 1024 * 1024
 // Files listed before the scan list is truncated; the counts stay exact either way.
@@ -47,7 +68,10 @@ const SCAN_ROW_CAP = 60
 //   ARCHIVIST_BUG_ENDPOINT  默认 http://42.194.129.192:8787/api/bugs
 //   ARCHIVIST_BUG_REPORT=0  关闭上报（默认开）
 const BUG_ENDPOINT_DEFAULT = 'http://42.194.129.192:8787/api/bugs'
-export const PLUGIN_VERSION = '1.0.2'
+// 2.0.0: Phase 1–5 — SQLite index (FTS5 BM25) + chunk/span anchors + hybrid retrieval
+//        (lexical/dense/RRF) + evidence packs + citation verification + claims layer +
+//        intent routing + optional ML sidecar (embeddings/rerank). 16 tools.
+export const PLUGIN_VERSION = '2.0.0'
 const BUG_SOURCE = 'archivist-plugin'
 let HOST_NAME = 'unknown'
 
@@ -498,12 +522,15 @@ const AGENTS_TEMPLATE = `# Archivist 知识库 — Schema & Workflows（由插�
 ## 目录结构
 
 \`\`\`
+.index/              # 派生索引（SQLite，检索用；可随时整目录删除，下次检索自动重建；
+                     # 不参与检索/扫描/备份，不要手改，不要提交到 git）
 raw/                 # 不可变原始资料（Agent 只读，禁止修改）
   conversations/     # 对话蒸馏的原文（先说后编）
 wiki/
   index.md           # 目录（由插件 archivist_write / archivist_index 自动重建，勿手改）
   log.md             # 追加式时间线，格式：## [YYYY-MM-DD] 动作 | 标题
   overview.md        # 全局综述（活文档）
+  claims/            # 结构化事实（append-only JSONL，由 archivist_claim 维护；派生数据、可重抽）
   sources/           # 每份原始资料一页摘要
   entities/          # 人物/公司/项目实体页
   concepts/          # 概念/方法/框架页
@@ -517,6 +544,7 @@ wiki/
 title: 页面标题
 type: source | entity | concept | synthesis
 tags: [标签1, 标签2]
+aliases: [别名1, 别名2, 旧称]      # 可选（entity 页建议填）：检索时做双向扩展，提升同义/改写的召回
 sources: [来源 raw 文件路径]      # 页面结论的依据出处（有则必填）
 summary: 一句话摘要（用于目录）
 trust: high | medium | low       # 信任级别（见下）
@@ -550,15 +578,27 @@ last_updated: YYYY-MM-DD（由 archivist_write 自动填）
 3. 只写决策/结论/方法，不搬运流水账；没有 raw 出处的页默认 trust=low
 
 ### Query（提问）
-1. \`archivist_search\` 取前 10–15 个相关页；结果会标注 \`低信任\` / \`已被 xxx 替代\`，已撤回页自动排除；**穷尽/计数类问题（全部/从未/多少）改用 \`archivist_scan\`**（精确计数 + 命中文件清单：≤60 个全列，超出时明示截断与未显示条数、计数与文件数仍准确 + 覆盖声明：被跳过的文件与原因一并列出）
-2. \`archivist_read\` 精读命中页（可顺 wikilink 多跳）；低信任页只作导航，关键事实回读 \`sources\` 指向的 raw 原文验证，或在回答中声明来源级别
-3. 基于页面回答并引用页面路径；答案有价值时 \`archivist_write\` 存到 \`syntheses/\`
-4. \`archivist_log\` 追加：\`query | <问题>\`
+1. \`archivist_search\` 取前 10–15 个相关页；结果带**稳定锚点**（\`wiki/xxx.md@<版本8位>#c<块号>[起:止]\`），并标注 \`低信任\` / \`已被 xxx 替代\`，已撤回页自动排除；**穷尽/计数类问题（全部/从未/多少）改用 \`archivist_scan\`**（精确计数 + 命中文件清单：≤60 个全列，超出时明示截断与未显示条数、计数与文件数仍准确 + 覆盖声明：被跳过的文件与原因一并列出）
+2. 要一次性拿到带编号的证据（\`[S1]\`、含出处/日期/信任级别/更正状态）用 \`archivist_evidence\`；拿锚点只读命中片段用 \`archivist_read({ path: "wiki/xxx.md#c3" })\`（\`expand: "parent"\` 带父段）
+3. \`archivist_read\` 精读命中页（可顺 wikilink 多跳）；低信任页只作导航，关键事实回读 \`sources\` 指向的 raw 原文验证，或在回答中声明来源级别
+4. 回答时**引用锚点**而不是只引用页名；带引用的答案提交前用 \`archivist_verify\` 核验（每句的 \`[S#]\` 是否有对应原文、数字日期是否落在引用区间、目标是否已被撤回/替代）——核验失败就改答案，不要带着错引用交付
+5. 基于页面回答并引用页面路径；答案有价值时 \`archivist_write\` 存到 \`syntheses/\`
+6. \`archivist_log\` 追加：\`query | <问题>\`
 
 ### 纠错（永不覆盖历史）
 - 修正：用 \`archivist_write({ path: "新页.md", supersedes: "旧页.md" })\` 写替代页；旧页自动标记 \`superseded\`（检索降权并标注）
 - 撤回：\`archivist_write({ path: "旧页.md", retract: true, retractReason: "原因" })\`（检索排除）
 - 不要直接改写旧页结论了事；lint 会检查替代链完整性
+
+### Claims（结构化事实，当前状态 / 时间线 / 冲突）
+适用：需要机械回答"现在是多少 / 什么时候改的 / 有没有两个说法"的**耐久事实**（尺寸、口径、版本、负责人、约束值）。
+- 写：\`archivist_claim({ action: "add", claims: [{ subject, predicate, object, anchor, quote, validFrom? }] })\`
+  —— \`anchor\` 用检索/证据包给的锚点，\`quote\` 必须是锚点内的原文；**没有原文锚定的事实不入库**（会被拒写）。
+- 冲突：同一 subject+predicate 已有 active 值且 object 不同时，add 不会覆盖，会返回 \`conflicts\`；
+  确认新值后 \`archivist_claim({ action: "supersede", claimId, newObject?, validFrom?, reason })\` 关闭旧值（旧值保留 \`valid_to\`）。
+- 撤回：\`archivist_claim({ action: "retract", claimId, reason })\`。
+- 查：\`action: "list"\`（默认 active，可 \`asOf\` 看历史某天有效值）、\`action: "conflicts"\`；\`action: "reindex"\` 从 \`wiki/claims/*.jsonl\` 重建表。
+- claims 是**派生数据**（可重抽），真相仍在 raw/ 与页面；页面被撤回后其 claims 会标记 orphaned。
 
 ### Lint（周期性体检）
 - \`archivist_lint\` 查：断链、孤儿页、目录缺漏、缺 frontmatter、重复标题、非法 trust/status、替代链不完整
@@ -1046,12 +1086,71 @@ function resolveRead(dir, relRaw) {
   throw new Error(`page not found: wiki/${rel0}`)
 }
 
-export function readPages(dir, paths) {
+/**
+ * Resolve one anchor (`wiki/foo.md#c3` or the full `…#c3[120:480]`) against the
+ * current file. Anchors are content-addressed, so a stale version is reported
+ * instead of silently answering from changed text.
+ */
+function readAnchorSlice(dir, anchor, opts) {
+  const hit = resolveRead(dir, anchor.path)
+  const { fm, body } = parsePage(hit.text)
+  const sha = createHash('sha256').update(hit.text).digest('hex')
+  const notes = []
+  if (anchor.sha8 && !sha.startsWith(String(anchor.sha8).toLowerCase())) {
+    notes.push(`⚠ 锚点版本不匹配：@${anchor.sha8} ≠ 当前 @${sha.slice(0, 8)}——文件已变化，引用结论请重新核验`)
+  }
+  const chunks = chunkDocument(body)
+  const target = chunks.find((c) => c.ord === anchor.ord)
+  if (!target) {
+    const ords = chunks.map((c) => c.ord)
+    throw new Error(`${anchor.path}: chunk #c${anchor.ord} not found — this page currently has ords ${ords.slice(0, 8).join(', ')}${ords.length > 8 ? ', …' : ''}; the file changed, search again for a current anchor`)
+  }
+  let start = target.charStart
+  let end = target.charEnd
+  if (Number.isInteger(anchor.start) && Number.isInteger(anchor.end) && anchor.end > anchor.start) {
+    if (anchor.start >= target.charStart && anchor.end <= target.charEnd) {
+      start = anchor.start
+      end = anchor.end
+    } else {
+      notes.push(`⚠ 锚点区间 [${anchor.start}:${anchor.end}] 超出 chunk #c${target.ord} 的 [${target.charStart}:${target.charEnd}]，已按整块返回`)
+    }
+  }
+  const flags = []
+  if (fm.status === 'superseded') flags.push(`已被替代${fm.superseded_by ? ' → wiki/' + fm.superseded_by : ''}（请优先读替代页）`)
+  if (fm.status === 'retracted') flags.push(`已撤回${fm.retractReason ? '（' + fm.retractReason + '）' : ''}——不要作为事实依据`)
+  if (fm.trust === 'low') flags.push('低信任（模型派生，未锚定 raw 原文）')
+  if (fm.trust === 'high') flags.push('高信任（用户确认）')
+  const banner = flags.length ? `〔状态：${flags.join('；')}〕\n` : ''
+  const heading = target.headingPath ? `〔标题：${target.headingPath}〕\n` : ''
+  let out = `===== wiki/${hit.rel} #c${target.ord} [${start}:${end}] =====\n${banner}${heading}${body.slice(start, end)}`
+  if (notes.length) out += '\n\n' + notes.join('\n')
+  if (opts && opts.expand === 'parent' && Number.isInteger(target.parentOrd)) {
+    const parent = chunks.find((c) => c.ord === target.parentOrd)
+    if (parent) {
+      const parentTokens = estimateTokens(parent.text)
+      const cap = 3000
+      const ptext = parentTokens > cap
+        ? parent.text.slice(0, Math.max(400, Math.floor(parent.text.length * (cap / parentTokens)))) + ' …'
+        : parent.text
+      out += `\n\n〔父段 #c${parent.ord}${parent.headingPath ? ' ' + parent.headingPath : ''}（供上下文，勿单独引用）〕\n${ptext}`
+    }
+  }
+  return out
+}
+
+export function readPages(dir, paths, opts = {}) {
   const list = Array.isArray(paths) ? paths : [paths]
   if (!list.length) throw new Error('provide path or paths')
   const parts = []
   let total = 0
   for (const p of list) {
+    const anchor = parseAnchor(String(p))
+    if (anchor && Number.isInteger(anchor.ord)) {
+      const slice = readAnchorSlice(dir, anchor, opts)
+      total += slice.length
+      parts.push(slice)
+      continue
+    }
     const hit = resolveRead(dir, p)
     const { fm } = parsePage(hit.text)
     const flags = []
@@ -1159,58 +1258,81 @@ function scoreDocuments(docs, tokens) {
   return results
 }
 
-export function searchWiki(dir, query, limit = 15, scope = 'wiki') {
-  const tokens = tokenizeQuery(query)
-  const results = []
-  let skipNote = ''
-  if (scope === 'raw' || scope === 'all') {
-    const { docs, skips } = readRawDocs(dir)
-    const skipped = skipCount(skips)
-    if (skipped) {
-      skipNote = `\n\n覆盖声明：raw/ 有 ${skipped} 个文件未纳入检索（${describeSkips(skips)}），结果只覆盖其余 ${docs.length} 个文件。`
-    }
-    results.push(...scoreDocuments(docs.map((d) => ({
-      label: d.rel,
-      title: path.posix.basename(d.rel, '.md'),
-      text: d.text,
-      lower: d.text.toLowerCase(),
-      name: path.posix.basename(d.rel).toLowerCase(),
-    })), tokens))
+/** Coverage note kept from the pre-index implementation: skipped raw files must never vanish silently. */
+function p1CoverageNote(diagnostics) {
+  const s = diagnostics?.skipped
+  if (!s) return ''
+  const total = (s.size || 0) + (s.extension || 0) + (s.unreadable || 0)
+  if (!total) return ''
+  const parts = []
+  if (s.size) parts.push(`${s.size} 个超过 2MB`)
+  if (s.extension) parts.push(`${s.extension} 个扩展名不在白名单`)
+  if (s.unreadable) parts.push(`${s.unreadable} 个不可读`)
+  const files = Array.isArray(diagnostics.skippedFiles) && diagnostics.skippedFiles.length
+    ? `（如 ${diagnostics.skippedFiles.slice(0, 3).join(', ')}${diagnostics.skippedFiles.length > 3 ? ' 等' : ''}）`
+    : ''
+  return `\n\n覆盖声明：raw/ 有 ${total} 个文件未纳入检索（${parts.join('、')}）${files}。`
+}
+
+/** Any fallback path says so in the result: a degraded answer must never look like an indexed one. */
+function p1DegradeNote(diagnostics) {
+  const why = []
+  if (diagnostics?.degraded) why.push(String(diagnostics.degraded))
+  if (diagnostics?.legacy) why.push('本次为内存扫描降级结果')
+  return why.length ? `\n\n⚠ 降级：${why.join('；')}` : ''
+}
+
+/**
+ * Search entry point (signature frozen for existing callers and the bench harness).
+ *
+ * Delegates to the hybrid pipeline (SQLite BM25 + optional dense channel, RRF fusion,
+ * deterministic re-rank, parent expansion) and only collapses chunk hits to page-level
+ * rows here. Every result carries its stable anchor, so an answer can cite the exact
+ * span it came from instead of just the page.
+ *
+ * ASYNC on purpose: the dense channel and the cross-encoder reranker live in the ML
+ * sidecar process. Callers that only want the lexical pipeline can await anyway —
+ * `await` on the sync path is free — and the tool adapters await `runTool`, which
+ * passes sync tools through untouched.
+ */
+export async function searchWiki(dir, query, limit = 15, scope = 'wiki') {
+  const n = Math.max(1, Math.min(30, Number(limit) || 15))
+  const q = String(query ?? '')
+  let res
+  try {
+    res = await hybridSearch(dir, q, { limit: Math.max(30, n * 4), scope })
+  } catch (e) {
+    return `no match for "${q}" (scope: ${scope}). Hybrid retrieval failed: ${e?.message || e}\n\n⚠ 降级：检索管线不可用，本次没有回退到扫描（避免用未排序结果冒充检索）。`
   }
-  if (scope === 'wiki' || scope === 'all') {
-    const docs = listPages(dir)
-      .filter((p) => p.fm.status !== 'retracted')
-      .map((p) => ({
-        label: 'wiki/' + p.rel,
-        title: p.title,
-        summary: p.fm.summary,
-        text: p.body,
-        lower: p.body.toLowerCase(),
-        name: p.title.toLowerCase(),
-        tags: p.fm.tags || [],
-        status: p.fm.status || 'active',
-        trust: p.fm.trust,
-        supersededBy: p.fm.superseded_by,
-      }))
-    const scored = scoreDocuments(docs, tokens)
-    for (const r of scored) if (r.status === 'superseded') r.score = Math.round(r.score * 35) / 100
-    results.push(...scored)
+  const diagnostics = res.diagnostics || {}
+  const rows = []
+  const seen = new Set()
+  for (const hit of res.hits) {
+    if (seen.has(hit.path)) continue          // page-level collapse: keep the best chunk
+    seen.add(hit.path)
+    rows.push(hit)
+    if (rows.length >= n) break
   }
-  results.sort((a, b) => b.score - a.score)
-  const top = results.slice(0, Math.max(1, Math.min(30, limit)))
-  const exhaustHint = looksExhaustive(query)
+  const exhaustHint = looksExhaustive(q)
     ? `\n\n⚠ 穷尽/计数类意图检测：top-K 结果不能代表全库；请用 archivist_scan 获取精确计数与完整文件清单，并在回答中声明覆盖范围。`
     : ''
-  if (!top.length) {
-    return `no match for "${query}" (scope: ${scope}). Try other keywords, widen scope to 'all', or read wiki/index.md / wiki/overview.md directly.${exhaustHint}${skipNote}`
+  // Deterministic intent routing (P5): aggregation is already covered above; the
+  // other intents get one line of advice instead of being silently handled badly.
+  const intent = classifyIntent(q)
+  const intentHint = intent.intent === 'aggregation' ? '' : intentRoutingHint(intent.intent)
+  const routingHint = intentHint ? `\n\n${intentHint}` : ''
+  const notes = exhaustHint + routingHint + p1CoverageNote(diagnostics) + p1DegradeNote(diagnostics)
+  if (!rows.length) {
+    return `no match for "${q}" (scope: ${scope}). Try other keywords, widen scope to 'all', or read wiki/index.md / wiki/overview.md directly.${notes}`
   }
-  return top.map((r, i) => {
+  return rows.map((r, i) => {
     const marks = []
     if (r.status === 'superseded') marks.push(`已被 ${r.supersededBy ? 'wiki/' + r.supersededBy : '其他页'} 替代`)
     if (r.trust === 'low') marks.push('低信任')
     const mark = marks.length ? `（${marks.join('；')}）` : ''
-    return `${i + 1}. [${Math.round(r.score * 10) / 10}] ${r.label} — ${r.title}${mark}${r.summary ? ' | ' + r.summary : ''}\n   ${r.snippet}`
-  }).join('\n') + exhaustHint + skipNote
+    const where = r.headingPath ? ` 〔${r.headingPath}〕` : ''
+    return `${i + 1}. [${Math.round((r.score || 0) * 100)}] ${r.path} — ${r.title}${mark}${r.summary ? ' | ' + r.summary : ''}${where}\n   ${r.snippet || String(r.text || '').slice(0, 180)}\n   ↳ ${r.anchor}`
+  }).join('\n') + notes
 }
 
 // ---------------------------------------------------------------- scan
@@ -1433,17 +1555,10 @@ export function readLog(dir, n = 5) {
   } catch { return 'log is empty' }
 }
 
-// ---------------------------------------------------------------- status / estimate
+// ---------------------------------------------------------------- status
 
-export function estimateTokens(text) {
-  let cjk = 0, other = 0
-  for (const ch of text) {
-    const c = ch.codePointAt(0)
-    if ((c >= 0x3040 && c <= 0x30ff) || (c >= 0x3400 && c <= 0x4dbf) || (c >= 0x4e00 && c <= 0x9fff) || (c >= 0xf900 && c <= 0xfaff) || (c >= 0x3000 && c <= 0x303f) || (c >= 0xff00 && c <= 0xffef)) cjk++
-    else other++
-  }
-  return Math.round(cjk + other / 4)
-}
+// estimateTokens moved to mod-chunks.mjs (imported above): chunk sizing and the
+// status token estimate must use one definition, not two drifting copies.
 
 export function statusWorkspace(dir) {
   requireWiki(dir)
@@ -1476,6 +1591,82 @@ export function statusWorkspace(dir) {
     `--- last log ---`,
     readLog(dir, 3),
   ].filter(Boolean).join('\n')
+}
+
+// ---------------------------------------------------------------- index reporting
+
+const INDEX_DB_REL = path.posix.join('.index', 'archivist.db')
+
+function indexDbFile(dir) { return path.join(dir, ...INDEX_DB_REL.split('/')) }
+
+/** One status line about the derived search index; never builds it just to report. */
+function statusIndexLine(dir) {
+  if (!existsSync(indexDbFile(dir))) return 'search index: not built yet — the first archivist_search (or archivist_index) builds it'
+  try {
+    const db = openIndex(dir)
+    const st = indexStats(db) || {}
+    const docs = st.docs ?? st.docCount ?? '?'
+    const chunks = st.chunks ?? st.chunkCount ?? '?'
+    const bytes = st.dbBytes ?? st.bytes ?? '?'
+    const schema = st.schemaVersion ?? '?'
+    const rebuilt = st.rebuiltAt ?? st.builtAt ?? null
+    const reason = st.rebuildReason ? `（${st.rebuildReason}）` : ''
+    return `search index: ${docs} doc(s) / ${chunks} chunk(s) / ${bytes} bytes | schema v${schema}${rebuilt ? ' | built ' + rebuilt : ''}${reason}`
+  } catch (e) {
+    return `search index: unavailable (${e?.message || e}) — search falls back to the in-memory scan and says so in its output`
+  }
+}
+
+/** Vector-channel state (Phase 2); never loads a model just to report. */
+function statusVectorLine(dir) {
+  const ml = mlStatus({ dir })
+  const enabled = ml?.enabled !== false
+  if (!existsSync(indexDbFile(dir))) return `vector channel: ${enabled ? 'not built yet' : 'disabled (ARCHIVIST_ML=0)'}`
+  try {
+    const db = openIndex(dir)
+    const st = vectorStats(db, { dir }) || {}
+    if (st.degraded) return `vector channel: unavailable (${st.degraded}) — lexical channel only`
+    if (!st.count) return `vector channel: enabled (model ${st.model || '?'}) but 0 embeddings — run archivist_index to build them`
+    return `vector channel: ${st.count}/${st.chunks ?? '?'} chunk(s) embedded | model ${st.model || '?'} (dim ${st.dim || '?'})${st.missing ? ` | ${st.missing} missing — run archivist_index` : ''}`
+  } catch (e) {
+    return `vector channel: unavailable (${e?.message || e})`
+  }
+}
+
+/** Index drift appended to archivist_lint. */
+function lintIndexNote(dir) {
+  if (!existsSync(indexDbFile(dir))) return '\n\n检索索引：尚未建立（首次 archivist_search 会建；也可用 archivist_index 立即建）'
+  try {
+    const db = openIndex(dir)
+    const drift = indexDrift(db, dir) || {}
+    const missing = (drift.missing || []).length
+    const extra = (drift.extra || []).length
+    const stale = (drift.stale || []).length
+    if (!missing && !extra && !stale) return '\n\n检索索引：与文件系统一致（0 漂移）'
+    const bits = []
+    if (missing) bits.push(`${missing} 个文件未入索引`)
+    if (extra) bits.push(`${extra} 个索引项已无对应文件`)
+    if (stale) bits.push(`${stale} 个文件已变更未同步`)
+    return `\n\n检索索引漂移：${bits.join('、')} —— 运行 archivist_index 重建（下次检索也会自动增量同步）`
+  } catch (e) {
+    return `\n\n检索索引不可用：${e?.message || e}`
+  }
+}
+
+/** Index side of archivist_index: sync, then report counts and any rebuild note. */
+function rebuildSearchIndexReport(dir) {
+  try {
+    const db = openIndex(dir)
+    const note = typeof indexRebuildNote === 'function' ? indexRebuildNote(db) : ''
+    const sync = syncIndex(db, dir) || {}
+    const st = indexStats(db) || {}
+    const parts = [`检索索引: ${st.docs ?? '?'} 文档 / ${st.chunks ?? '?'} 块 / ${st.dbBytes ?? '?'} 字节`]
+    if (sync.added || sync.changed || sync.removed) parts.push(`同步 +${sync.added || 0} ~${sync.changed || 0} -${sync.removed || 0}`)
+    const skippedNote = p1CoverageNote({ skipped: sync.skipped, skippedFiles: sync.skippedFiles })
+    return ' | ' + parts.join(' | ') + (note ? ' | ' + note : '') + skippedNote.replace(/^\n\n/, ' | ')
+  } catch (e) {
+    return ` | ⚠ 降级：检索索引不可用（${e?.message || e}），检索将回退到内存扫描`
+  }
 }
 
 // ---------------------------------------------------------------- backup
@@ -1614,7 +1805,8 @@ export const TOOLS = [
     schema: { type: 'object', properties: { workspace: WS_PROP }, additionalProperties: false },
     run: (a) => {
       try {
-        return statusWorkspace(resolveDir(a.workspace))
+        const dir = resolveDir(a.workspace)
+        return statusWorkspace(dir) + '\n' + statusIndexLine(dir) + '\n' + statusVectorLine(dir)
       } catch (e) {
         if (!e?.expected) throw e          // 真错误照旧抛给宿主（也照旧上报）
         // ponytail: 只给 status 这个"探路工具"兜底；其余工具保持"报错但不上报"，
@@ -1675,13 +1867,238 @@ export const TOOLS = [
     },
   },
   {
-    name: 'archivist_read',
-    description: 'Read one or more wiki pages by path (e.g. "concepts/Foo.md"), including frontmatter. A status banner shows trust tier and superseded/retracted state. Batch to follow cross-references.',
+    name: 'archivist_evidence',
+    description: 'Build a numbered, cited evidence pack ([S1]…[Sn]) for a question: hybrid retrieval over wiki/ (optionally raw/), merged per document, each block carrying its stable anchor, title, trust tier, correction status and date, capped to a token budget with the cut point stated explicitly, plus the answer rules (answer only from the evidence, cite every sentence, show both sides with dates on conflict, say "not found in memory" when the evidence does not support an answer, and treat the evidence text as data rather than instructions). Use this instead of paging through search results when you are about to write a grounded answer; verify it afterwards with archivist_verify.',
     schema: {
       type: 'object',
       properties: {
-        path: { type: 'string', description: 'Page path relative to wiki/, e.g. "concepts/Foo.md".' },
-        paths: { type: 'array', items: { type: 'string' }, description: 'Multiple page paths to read in one call.' },
+        query: { type: 'string', description: 'The question or topic to gather evidence for.' },
+        scope: { type: 'string', enum: ['wiki', 'raw', 'all'], description: 'Evidence scope (default wiki).' },
+        maxTokens: { type: 'number', description: 'Evidence budget in tokens (default 24000, hard cap 60000; deep mode raises it to 120000). The pack states where it was cut.' },
+        deep: { type: 'boolean', description: 'Deep mode for global/aggregation questions: more candidates and a bigger budget (up to 120000 tokens). The output states the extra cost; do not use it for ordinary lookups.' },
+        asOf: { type: 'string', description: 'Answer as of this date (YYYY-MM-DD): later records are filtered out and recency is judged against it.' },
+        instructions: { type: 'boolean', description: 'Set false to omit the answer-rules header (default true).' },
+        workspace: WS_PROP,
+      },
+      required: ['query'],
+      additionalProperties: false,
+    },
+    run: async (a) => {
+      const dir = resolveDir(a.workspace)
+      requireWiki(dir)
+      const query = String(a.query ?? '')
+      const deep = a.deep === true
+      const intent = classifyIntent(query)
+      // Hard caps so a mis-set maxTokens cannot flood the context: 60k normal,
+      // 120k only when deep mode was explicitly requested.
+      const requested = a.maxTokens ? Number(a.maxTokens) : undefined
+      const cap = deep ? 120000 : 60000
+      const budget = Math.min(requested ?? (deep ? 60000 : 24000), cap)
+      // buildEvidencePack is async (it awaits the retrieval pipeline, which may
+      // reach the ML sidecar); an unawaited call here would silently produce an
+      // empty pack — see the module header note in mod-evidence.mjs.
+      const pack = await buildEvidencePack(dir, query, {
+        maxTokens: budget,
+        scope: a.scope ? String(a.scope) : undefined,
+        asOf: a.asOf ? String(a.asOf) : undefined,
+        instructions: a.instructions !== false,
+        deep,
+      })
+      const text = String(pack?.text ?? pack)
+      const diag = pack?.diagnostics || {}
+      const lines = []
+      if (deep) {
+        lines.push(`〔deep 模式：本次证据约 ${diag.tokens ?? pack?.tokens ?? '?'} token（上限 ${budget}）；只为全局梳理/聚合问题显式使用，常规查询请关闭〕`)
+      }
+      // Structured claims riding along with the textual evidence: for
+      // current-state/timeline/aggregation questions the active values and
+      // contradictions are usually more directly answerable than prose.
+      let claimNote = ''
+      if (intentWantsClaims(intent.intent) || a.claims === true) {
+        try {
+          const db = openIndex(dir)
+          ensureClaimsSchema(db, dir)
+          const hitPaths = [...new Set((pack?.blocks || []).map((b) => b.path).filter(Boolean))]
+          const cp = claimsForPack(dir, db, { pagePaths: hitPaths, asOf: a.asOf ? String(a.asOf) : undefined, limit: 10 })
+          const claimLines = []
+          for (const c of cp.claims || []) {
+            claimLines.push(`- ${c.subject} / ${c.predicate} = ${c.object}${c.valid_from ? `（自 ${c.valid_from}）` : ''}${c.valid_to ? `（至 ${c.valid_to}）` : ''} ↳ ${c.anchor}`)
+          }
+          if (claimLines.length) claimNote = `〔结构化 claims（当前有效值，证据来自上方锚点）：\n${claimLines.join('\n')}\n〕`
+          if (cp.conflicts?.length) {
+            claimNote += `\n〔⚠ claims 冲突：${cp.conflicts.map((c) => `${c.subject}/${c.predicate}：${c.objects?.join(' vs ') || c.objects}`).join('；')}——回答时两个值都要给日期〕`
+          }
+        } catch {
+          // claims 是补充信息：读取失败不阻断证据包，主体证据仍然完整。
+        }
+      }
+      const hint = intentRoutingHint(intent.intent)
+      if (hint) lines.push(hint)
+      if (intent.intent === 'aggregation') {
+        const docs = diag.docs ?? diag.docCount ?? '?'
+        const blocks = Array.isArray(pack?.blocks) ? pack.blocks.length : (diag.blocks ?? '?')
+        lines.push(`覆盖：检索命中 ${docs} 个文档 / ${blocks} 个证据块${diag.truncated ? '（证据包已截断，见包内提示）' : ''}；聚合类答案必须带这个覆盖数字。`)
+      }
+      const head = lines.length ? `${lines.join('\n')}\n\n` : ''
+      return claimNote ? `${head}${text}\n\n${claimNote}` : `${head}${text}`
+    },
+  },
+  {
+    name: 'archivist_verify',
+    description: 'Verify citations before delivering a grounded answer. Each citation is {id?, anchor | path, quote?, span?: [start,end]}: checks that the target exists, the anchor version still matches the file, the quote actually occurs inside the cited span, and the target is neither retracted (always a failure) nor superseded (a failure in strict mode). Pure string/existence checks over the files themselves (independent of the search index) — no entailment model, so a pass means "that quote is there", not "the sentence follows from it". Without citations it verifies the memory targets themselves.',
+    schema: {
+      type: 'object',
+      properties: {
+        citations: {
+          type: 'array',
+          description: 'Citations: [{ id?, anchor | path, quote?, span?: [start,end] }]. A JSON string is also accepted.',
+          items: {
+            type: 'object',
+            properties: {
+              id: { type: 'string', description: 'Citation label used in the answer, e.g. "S1".' },
+              anchor: { type: 'string', description: 'Stable anchor from archivist_search/archivist_evidence, e.g. "wiki/foo.md#c3[120:480]".' },
+              path: { type: 'string', description: 'Page path when no anchor is given, e.g. "concepts/Foo.md" or "wiki/concepts/Foo.md".' },
+              quote: { type: 'string', description: 'Verbatim text the answer attributes to this source.' },
+              span: { type: 'array', items: { type: 'number' }, description: 'Optional [start, end] character range to check against.' },
+            },
+            additionalProperties: false,
+          },
+        },
+        strict: { type: 'boolean', description: 'Treat an answer citing a superseded page as a failure (default true).' },
+        workspace: WS_PROP,
+      },
+      required: ['citations'],
+      additionalProperties: false,
+    },
+    run: (a) => {
+      const dir = resolveDir(a.workspace)
+      requireWiki(dir)
+      let list
+      const raw = a.citations
+      if (typeof raw === 'string') {
+        try {
+          const parsed = JSON.parse(raw)
+          list = Array.isArray(parsed) ? parsed : [parsed]
+        } catch (e) {
+          throw new Error(`archivist_verify: citations must be a JSON array like [{"id":"S1","anchor":"wiki/foo.md#c3[120:480]","quote":"..."}] — ${e.message}`)
+        }
+      } else list = Array.isArray(raw) ? raw : [raw]
+      const res = verifyCitations(dir, list, { strict: a.strict !== false })
+      return formatVerifyReport(res.results, res.summary)
+    },
+  },
+  {
+    name: 'archivist_claim',
+    description: 'Structured claims (subject, predicate, object) with validity windows and source anchors — the derived knowledge layer for current-state / corrected / timeline questions. Actions: add (append factual claims, each verified against its anchor+quote before it is stored; conflicting active values are reported, not silently overwritten), supersede (close an old claim with valid_to and optionally add the new value), retract (mark a claim withdrawn), list (query active/current values, optionally as of a date), conflicts (list contradicting active values), reindex (rebuild the claims table from the append-only JSONL files under wiki/claims/). Claims are derived data: the truth stays in raw/ and wiki/ pages; the plugin never extracts claims itself.',
+    schema: {
+      type: 'object',
+      properties: {
+        action: { type: 'string', enum: ['add', 'supersede', 'retract', 'list', 'conflicts', 'reindex'], description: 'Operation to perform.' },
+        claims: {
+          type: 'array',
+          description: 'For action=add: [{subject, predicate, object, object_type?, validFrom?, validTo?, anchor, quote, confidence?}]. anchor must point at an existing page chunk and quote must appear inside it.',
+          items: {
+            type: 'object',
+            properties: {
+              subject: { type: 'string', description: 'Canonical entity name (matched against entities/ pages; aliases are normalized).' },
+              predicate: { type: 'string', description: 'Property phrase, e.g. "全国地图尺寸".' },
+              object: { type: 'string', description: 'Value, verbatim from the source when possible.' },
+              object_type: { type: 'string', description: 'string | number | date | bool (inferred when omitted).' },
+              validFrom: { type: 'string', description: 'When the fact became true (YYYY-MM-DD), optional.' },
+              validTo: { type: 'string', description: 'When it stopped being true, optional (null = still true).' },
+              anchor: { type: 'string', description: 'Stable anchor of the evidence, e.g. "wiki/foo.md@1a2b3c4d#c3[120:480]".' },
+              quote: { type: 'string', description: 'Verbatim text inside that anchor supporting the claim.' },
+              confidence: { type: 'number', description: '0..1 extractor confidence.' },
+            },
+            additionalProperties: false,
+          },
+        },
+        file: { type: 'string', description: 'For add: claims file slug under wiki/claims/ (default "claims").' },
+        claimId: { type: 'string', description: 'For supersede/retract: the claim_id to change.' },
+        newObject: { type: 'string', description: 'For supersede: the replacement value (optional).' },
+        validFrom: { type: 'string', description: 'For supersede: when the replacement became true.' },
+        anchor: { type: 'string', description: 'For supersede: anchor of the replacement evidence (optional).' },
+        quote: { type: 'string', description: 'For supersede: supporting quote for the replacement (optional).' },
+        reason: { type: 'string', description: 'Why the claim was superseded or retracted.' },
+        subject: { type: 'string', description: 'For list/conflicts: filter by subject.' },
+        predicate: { type: 'string', description: 'For list: filter by predicate.' },
+        asOf: { type: 'string', description: 'For list: only claims valid at this date (YYYY-MM-DD).' },
+        status: { type: 'string', enum: ['active', 'superseded', 'retracted', 'all'], description: 'For list: status filter (default active).' },
+        limit: { type: 'number', description: 'For list/conflicts: max rows (default 50).' },
+        workspace: WS_PROP,
+      },
+      required: ['action'],
+      additionalProperties: false,
+    },
+    run: (a) => {
+      const dir = resolveDir(a.workspace)
+      requireWiki(dir)
+      const action = String(a.action)
+      let db
+      try {
+        db = openIndex(dir)
+        ensureClaimsSchema(db, dir)
+      } catch (e) {
+        throw new Error(`claims 存储不可用（检索索引打不开）：${e?.message || e}`)
+      }
+      if (action === 'add') {
+        const list = Array.isArray(a.claims) ? a.claims : (a.claims ? [a.claims] : [])
+        if (!list.length) throw new Error('archivist_claim add: pass claims:[{subject,predicate,object,anchor,quote}]')
+        const res = claimsAdd(dir, db, { claims: list, file: a.file })
+        const added = Array.isArray(res.added) ? res.added.length : Number(res.added || 0)
+        const skipped = Array.isArray(res.skipped) ? res.skipped.length : Number(res.skipped || 0)
+        const lines = [`claims: added ${added}${skipped ? `, skipped ${skipped} (duplicate)` : ''}${res.rejected?.length ? `, rejected ${res.rejected.length}` : ''}`]
+        for (const r of res.rejected || []) lines.push(`  ✗ #${r.index}: ${r.reason}`)
+        for (const w of res.warnings || []) lines.push(`  ⚠ #${w.index}: ${w.message}`)
+        for (const c of res.conflicts || []) {
+          lines.push(`  ⚠ 冲突：${c.subject} / ${c.predicate}：旧值 "${c.oldObject}"（${c.claim_id}）vs 新值 "${c.newObject}"${c.validFrom ? `（${c.validFrom}）` : ''} — 需要时用 action=supersede 关闭旧值`)
+        }
+        if (res.written?.file) lines.push(`  written: ${res.written.file} (+${res.written.lines} line(s))`)
+        return lines.join('\n')
+      }
+      if (action === 'supersede') {
+        const res = claimsSupersede(dir, db, { claimId: a.claimId, newObject: a.newObject, validFrom: a.validFrom, reason: a.reason, anchor: a.anchor, quote: a.quote })
+        if (!res.ok) return `supersede failed: ${res.reason || 'unknown'}`
+        return `superseded ${res.oldClaim?.claim_id}${res.newClaim ? ` → new claim ${res.newClaim.claim_id}` : ''}${res.oldClaim?.valid_to ? ` (valid_to ${res.oldClaim.valid_to})` : ''}`
+      }
+      if (action === 'retract') {
+        const res = claimsRetract(dir, db, { claimId: a.claimId, reason: a.reason })
+        if (!res.ok) return `retract failed: ${res.reason || 'unknown'}`
+        return res.already ? `claim ${a.claimId} was already retracted` : `retracted ${res.claim?.claim_id}${res.claim?.reason ? `：${res.claim.reason}` : ''}`
+      }
+      if (action === 'reindex') {
+        const res = claimsReindex(db, dir)
+        return `claims reindexed: ${res.claims} claim(s) from ${res.files} file(s) (${res.lines} line(s), ${res.badLines} bad)`
+      }
+      if (action === 'conflicts') {
+        const res = claimsConflicts(dir, db, { subject: a.subject, limit: a.limit ? Number(a.limit) : undefined })
+        if (!res.conflicts.length) return `no conflicts among ${res.claimsChecked} active claim(s)`
+        return res.conflicts.map((c) => `⚠ ${c.subject} / ${c.predicate}：${c.objects.map((o) => `"${o}"`).join(' vs ')}（${c.claims.length} 条 active）`).join('\n') + `\n（${res.total} 组冲突，共检查 ${res.claimsChecked} 条 active claim）`
+      }
+      // list
+      const wantedStatus = a.status || (a.asOf ? 'all' : 'active')
+      const res = claimsList(dir, db, {
+        subject: a.subject, predicate: a.predicate, asOf: a.asOf,
+        // `asOf` asks "what was true at that date", and the historical value lives
+        // in a superseded row: an as-of query must not silently default to
+        // active-only, or the caller reads "no record that day" from a real record.
+        status: wantedStatus, limit: a.limit ? Number(a.limit) : undefined,
+      })
+      if (!res.claims.length) return `no ${wantedStatus} claims${a.subject ? ` for "${a.subject}"` : ''}${a.asOf ? ` as of ${a.asOf}` : ''}`
+      const stats = claimsStats(db)
+      const rows = res.claims.map((c) => `- ${c.subject} / ${c.predicate} = ${c.object}${c.valid_from ? `（自 ${c.valid_from}）` : ''}${c.valid_to ? `（至 ${c.valid_to}）` : ''} [${c.confidence ?? '?'}${c.orphaned ? ' · 页面已撤回/缺失' : ''}] id=${c.claim_id} ↳ ${c.anchor}`)
+      return rows.join('\n') + `\n(${res.total} 条${res.truncated ? '，已截断' : ''}；库内 active ${stats.active} / total ${stats.total})`
+    },
+  },
+  {
+    name: 'archivist_read',
+    description: 'Read one or more wiki pages by path (e.g. "concepts/Foo.md"), including frontmatter. A status banner shows trust tier and superseded/retracted state. A path may instead be a stable anchor handed out by archivist_search / archivist_evidence ("wiki/foo.md#c3" or the full "…#c3[120:480]") to read only that span; a stale anchor version is reported rather than silently answered from changed text. Batch to follow cross-references.',
+    schema: {
+      type: 'object',
+      properties: {
+        path: { type: 'string', description: 'Page path relative to wiki/, e.g. "concepts/Foo.md", or an anchor "wiki/foo.md#c3[120:480]".' },
+        paths: { type: 'array', items: { type: 'string' }, description: 'Multiple page paths (or anchors) to read in one call.' },
+        expand: { type: 'string', enum: ['none', 'parent'], description: 'For anchor reads: also include the parent section text for context (default none).' },
         workspace: WS_PROP,
       },
       additionalProperties: false,
@@ -1689,7 +2106,7 @@ export const TOOLS = [
     run: (a) => {
       const dir = resolveDir(a.workspace)
       requireWiki(dir)
-      return readPages(dir, a.paths || a.path)
+      return readPages(dir, a.paths || a.path, { expand: a.expand === 'parent' ? 'parent' : 'none' })
     },
   },
   {
@@ -1728,13 +2145,28 @@ export const TOOLS = [
   },
   {
     name: 'archivist_index',
-    description: 'Deterministically rebuild wiki/index.md from all pages (repairs drift). Run after bulk edits or when lint reports index-missing.',
+    description: 'Deterministically rebuild wiki/index.md from all pages (repairs drift), rebuild/sync the derived search index (.index/, SQLite + FTS5), and — when the ML sidecar is configured — embed any chunks missing from the vector channel (incremental, batch). Run after bulk edits, when lint reports index drift, or once to enable the dense channel.',
     schema: { type: 'object', properties: { workspace: WS_PROP }, additionalProperties: false },
-    run: (a) => {
+    // Embedding a cold 10M-token corpus can exceed the default 30s tool budget;
+    // the first archivist_index after enabling ML is the one that pays it.
+    timeoutMs: 600000,
+    run: async (a) => {
       const dir = resolveDir(a.workspace)
       requireWiki(dir)
       const n = rebuildIndex(dir)
-      return `index rebuilt: ${n} page(s) listed`
+      let out = `index rebuilt: ${n} page(s) listed${rebuildSearchIndexReport(dir)}`
+      let db = null
+      try { db = openIndex(dir) } catch { /* rebuildSearchIndexReport already explained the failure */ }
+      if (db) {
+        try {
+          const vec = await embedPending(db, { dir })
+          if (vec && vec.degraded) out += ` | 向量: ${vec.degraded}`
+          else if (vec) out += ` | 向量: ${vec.embedded} 块已嵌入（模型 ${vec.model}，维度 ${vec.dim}，跳过 ${vec.skipped}，失败 ${vec.failed}，${Math.round(vec.ms || 0)}ms）`
+        } catch (e) {
+          out += ` | 向量: 不可用（${e?.message || e}）——检索将只用词法通道`
+        }
+      }
+      return out
     },
   },
   {
@@ -1751,7 +2183,7 @@ export const TOOLS = [
     run: (a) => {
       const dir = resolveDir(a.workspace)
       requireWiki(dir)
-      return lintWiki(dir, { fix: !!a.fix })
+      return lintWiki(dir, { fix: !!a.fix }) + lintIndexNote(dir)
     },
   },
   {
@@ -1885,12 +2317,24 @@ export function runTool(tool, args) {
     if (missing.length) {
       throw new Error(`${tool.name}: missing required parameter(s) ${missing.map((k) => `"${k}"`).join(', ')} — declared: ${declared.join(', ')}`)
     }
-    const out = String(tool.run(mapped))
-    return notes.length ? `${out} | alias ${notes.join(', ')}` : out
+    // A tool's `run` may be sync (most) or async (anything that reaches the ML
+    // sidecar: search/evidence). Return type mirrors the tool, so sync callers keep
+    // getting a string; the adapters `await` either way.
+    const raw = tool.run(mapped)
+    if (raw && typeof raw.then === 'function') {
+      return raw.then((value) => withAliasNote(value, notes))
+    }
+    return withAliasNote(raw, notes)
   } catch (err) {
     reportToolFailure(tool.name, args, err)   // 自动上报；fire-and-forget，绝不影响下面这行
     throw err
   }
+}
+
+/** Append the alias-mapping receipt to a tool result. */
+function withAliasNote(value, notes) {
+  const out = String(value)
+  return notes.length ? `${out} | alias ${notes.join(', ')}` : out
 }
 
 // ---------------------------------------------------------------- CLI (host-independent self-test)
@@ -1923,7 +2367,9 @@ if (isMain) {
     }
   }
   try {
-    const out = runTool(tool, args)
+    // `runTool` returns a string for sync tools and a Promise for tools that reach
+    // the ML sidecar; awaiting either is correct at the CLI boundary.
+    const out = await runTool(tool, args)
     console.log(out)
   } catch (e) {
     console.error('error: ' + e.message)

@@ -60,7 +60,7 @@ for (const q of battery) {
   let top = []
   for (let r = 0; r < rounds; r++) {
     const start = performance.now()
-    const out = String(searchWiki(dir, q, 10, 'raw'))
+    const out = String(await searchWiki(dir, q, 10, 'raw'))
     times.push(performance.now() - start)
     if (r === rounds - 1) {
       if (out.includes('no match')) top = ['(no match)']
